@@ -34,6 +34,26 @@ The server requires the following configuration parameters:
 - **Port**: 3000 (internal)
 - **Health Check**: Enabled
 - **User**: Non-root (mcpuser)
+- **Tool Loading**: Lazy loading implemented to prevent timeout
+
+## Lazy Loading Strategy
+
+To prevent timeout during Smithery's tool scanning process, the server implements a lazy loading strategy:
+
+1. **Essential Tools First**: Only basic Home Assistant tools are registered immediately
+2. **Delayed Loading**: Additional tool categories are loaded after a 500ms delay
+3. **Timeout Prevention**: This ensures Smithery can scan tools without hitting request timeouts
+4. **Full Functionality**: All 25+ tools become available shortly after deployment
+
+### Tool Categories Loading Order
+
+1. **Immediate**: Basic tools (API status, entity states, service calls)
+2. **Delayed (500ms)**:
+   - Automation tools (automations, scenes, scripts)
+   - History tools (entity history, logbook, events)
+   - Device tools (lights, climate, media players)
+   - System tools (system info, templates, areas)
+   - Resource tools (URI-based access)
 
 ## Build Process
 

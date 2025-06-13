@@ -6,6 +6,8 @@
 
 A comprehensive MCP (Model Context Protocol) server that provides extensive integration with Home Assistant, enabling AI assistants to interact with smart home devices, automations, and system management.
 
+> **🚧 Smithery Deployment Status**: Currently optimizing tool loading to prevent timeout during Smithery's tool scanning. See [TIMEOUT_RESOLUTION.md](TIMEOUT_RESOLUTION.md) for details.
+
 ## 🎆 Features
 
 ### 📊 Basic Operations
