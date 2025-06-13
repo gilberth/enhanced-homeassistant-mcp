@@ -11,6 +11,8 @@ import { registerAutomationTools } from "./tools/homeassistant/automation.js";
 import { registerHistoryTools } from "./tools/homeassistant/history.js";
 import { registerDeviceTools } from "./tools/homeassistant/devices.js";
 import { registerSystemTools } from "./tools/homeassistant/system.js";
+import { registerResourceTools } from "./tools/homeassistant/resources.js";
+// import { registerPrompts } from "./tools/homeassistant/prompts.js";
 
 // Create the MCP server
 const server = new McpServer({
@@ -56,6 +58,10 @@ function registerAllTools() {
   registerHistoryTools(server);
   registerDeviceTools(server);
   registerSystemTools(server);
+  registerResourceTools(server);
+  
+  // Note: Prompts temporarily disabled due to MCP compatibility
+  // registerPrompts(server);
   
   console.error('All tools registered successfully');
 }

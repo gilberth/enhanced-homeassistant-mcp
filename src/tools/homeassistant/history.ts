@@ -14,50 +14,256 @@ import {
  * Register history and monitoring tools
  */
 export function registerHistoryTools(server: McpServer) {
-  // Tool to get entity history
+  // Tool to get entity history (enhanced version from Python)
   server.tool(
     "homeassistant_get_entity_history",  
-    "Get historical data for a Home Assistant entity",
+    "Get historical data for a Home Assistant entity with detailed analysis",
     {
       entity_id: z.string().describe("The entity ID to get history for"),
-      start_time: z.string().optional().describe("Start time in ISO format (e.g., '2023-01-01T00:00:00Z')"),
-      end_time: z.string().optional().describe("End time in ISO format"),
-      minimal_response: z.boolean().optional().describe("Get minimal response (state changes only)")
+      hours: z.number().optional().default(24).describe("Number of hours of history to retrieve (default: 24)")
     },
-    async ({ entity_id, start_time, end_time, minimal_response }) => {  
-      const result = await getHistory(entity_id, start_time, end_time, minimal_response);
+    async ({ entity_id, hours = 24 }: { entity_id: string; hours?: number }) => {  
+      console.error(`Getting history for entity: ${entity_id}, hours: ${hours}`);
+      
+      try {
+        // Calculate start time
+        const endTime = new Date();
+        const startTime = new Date(endTime.getTime() - (hours * 60 * 60 * 1000));
+        
+        const result = await getHistory(entity_id, startTime.toISOString(), endTime.toISOString(), false);
+        
+        if (!result.success) {
+          return formatErrorResponse(`Failed to get history: ${result.message}`);
+        }
+        
+        const history = result.data;
+        
+        if (!history || history.length === 0 || !history[0] || history[0].length === 0) {
+          return formatSuccessResponse(`No history found for ${entity_id} in the last ${hours} hours`);
+        }
+        
+        const entityHistory = history[0]; // First array contains our entity's history
+        
+        // Analyze the history data
+        const stateChanges = entityHistory.length;
+        const states: { [key: string]: number } = {};
+        const timeSpentInStates: { [key: string]: number } = {};
+        
+        let lastState: string | null = null;
+        let lastTime: number | null = null;
+        
+        entityHistory.forEach((record: any, index: number) => {
+          const state = record.state;
+          states[state] = (states[state] || 0) + 1;
+          
+          // Calculate time spent in previous state
+          if (lastState !== null && lastTime !== null) {
+            const currentTime = new Date(record.last_updated).getTime();
+            const timeDiff = currentTime - lastTime;
+            timeSpentInStates[lastState] = (timeSpentInStates[lastState] || 0) + timeDiff;
+          }
+          
+          lastState = state;
+          lastTime = new Date(record.last_updated).getTime();
+        });
+        
+        // Calculate time spent in final state (up to now)
+        if (lastState !== null && lastTime !== null) {
+          const timeDiff = endTime.getTime() - lastTime;
+          timeSpentInStates[lastState] = (timeSpentInStates[lastState] || 0) + timeDiff;
+        }
+        
+        const output = [
+          `# History Analysis for ${entity_id} (Last ${hours} hours)`,
+          "",
+          `**Total state changes**: ${stateChanges}`,
+          `**Time period**: ${startTime.toLocaleString()} to ${endTime.toLocaleString()}`,
+          ""
+        ];
+        
+        // Add state distribution
+        output.push("## State Distribution:");
+        Object.entries(states).forEach(([state, count]) => {
+          const percentage = ((count / stateChanges) * 100).toFixed(1);
+          output.push(`- **${state}**: ${count} occurrences (${percentage}%)`);
+        });
+        output.push("");
+        
+        // Add time spent in each state
+        output.push("## Time Spent in Each State:");
+        const totalTimeMs = hours * 60 * 60 * 1000;
+        Object.entries(timeSpentInStates).forEach(([state, timeMs]) => {
+          const percentage = ((timeMs / totalTimeMs) * 100).toFixed(1);
+          const timeHours = (timeMs / (1000 * 60 * 60)).toFixed(2);
+          output.push(`- **${state}**: ${timeHours} hours (${percentage}%)`);
+        });
+        output.push("");
+        
+        // Add recent changes (last 10)
+        output.push("## Recent Changes (Last 10):");
+        const recentChanges = entityHistory.slice(-10);
+        recentChanges.forEach((record: any) => {
+          const timestamp = new Date(record.last_updated).toLocaleString();
+          const unit = record.attributes?.unit_of_measurement || '';
+          output.push(`- ${timestamp}: **${record.state}** ${unit}`);
+          
+          // Add relevant attributes for certain entity types
+          if (record.attributes) {
+            const domain = entity_id.split('.')[0];
+            let importantAttrs: string[] = [];
+            
+            switch (domain) {
+              case 'light':
+                importantAttrs = ['brightness', 'color_temp', 'rgb_color'];
+                break;
+              case 'climate':
+                importantAttrs = ['current_temperature', 'target_temperature', 'hvac_action'];
+                break;
+              case 'media_player':
+                importantAttrs = ['media_title', 'volume_level'];
+                break;
+              case 'sensor':
+                importantAttrs = ['device_class'];
+                break;
+            }
+            
+            importantAttrs.forEach(attr => {
+              if (record.attributes[attr] !== undefined) {
+                output.push(`  ${attr}: ${record.attributes[attr]}`);
+              }
+            });
+          }
+        });
+        
+        return formatSuccessResponse(output.join('\n'));
+        
+      } catch (error: any) {
+        return formatErrorResponse(`Error getting history: ${error.message}`);
+      }
+    }
+  );
+
+  // Tool to get Home Assistant error log (from Python code)
+  server.tool(
+    "homeassistant_get_error_log",
+    "Get the Home Assistant error log for troubleshooting",
+    {},
+    async () => {
+      console.error("Getting Home Assistant error log");
+      
+      const result = await getErrorLog();
       
       if (!result.success) {
-        return formatErrorResponse(`Failed to get history: ${result.message}`);
+        return formatErrorResponse(`Failed to get error log: ${result.message}`);
       }
       
-      const history = result.data;
-      
-      if (!history || history.length === 0) {
-        return formatSuccessResponse(`No history found for ${entity_id}`);
-      }
-      
-      const output = [`History for ${entity_id}:`, ""];
-      
-      // History comes as an array of arrays, one per entity
-      history.forEach((entityHistory: any[]) => {
-        if (entityHistory && entityHistory.length > 0) {
-          output.push(`Found ${entityHistory.length} records:`);
+      try {
+        const logText = typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
+        const lines = logText.split('\n');
+        
+        // Analyze the log
+        let errorCount = 0;
+        let warningCount = 0;
+        const integrationMentions: { [key: string]: number } = {};
+        const errorSamples: string[] = [];
+        const warningSamples: string[] = [];
+        
+        lines.forEach(line => {
+          const lowerLine = line.toLowerCase();
           
-          // Show last 10 records to avoid overwhelming output
-          const records = entityHistory.slice(-10);
-          records.forEach((record: any) => {
-            const timestamp = new Date(record.last_updated).toLocaleString();
-            output.push(`${timestamp}: ${record.state} ${record.attributes?.unit_of_measurement || ''}`);
-          });
-          
-          if (entityHistory.length > 10) {
-            output.push(`... and ${entityHistory.length - 10} more records`);
+          if (lowerLine.includes('error')) {
+            errorCount++;
+            if (errorSamples.length < 5) {
+              errorSamples.push(line.trim());
+            }
           }
+          
+          if (lowerLine.includes('warning') || lowerLine.includes('warn')) {
+            warningCount++;
+            if (warningSamples.length < 5) {
+              warningSamples.push(line.trim());
+            }
+          }
+          
+          // Look for integration mentions
+          const integrationPatterns = [
+            /homeassistant\.components\.(\w+)/g,
+            /custom_components\.(\w+)/g,
+            /(\w+)\s+integration/gi
+          ];
+          
+          integrationPatterns.forEach(pattern => {
+            let match;
+            while ((match = pattern.exec(line)) !== null) {
+              const integration = match[1].toLowerCase();
+              integrationMentions[integration] = (integrationMentions[integration] || 0) + 1;
+            }
+          });
+        });
+        
+        const output = [
+          "# Home Assistant Error Log Analysis",
+          "",
+          `**Total log lines**: ${lines.length}`,
+          `**Error entries**: ${errorCount}`,
+          `**Warning entries**: ${warningCount}`,
+          ""
+        ];
+        
+        // Add integration mentions
+        if (Object.keys(integrationMentions).length > 0) {
+          output.push("## Most Mentioned Integrations:");
+          const sortedIntegrations = Object.entries(integrationMentions)
+            .sort(([, a], [, b]) => b - a)
+            .slice(0, 10);
+          
+          sortedIntegrations.forEach(([integration, count]) => {
+            output.push(`- **${integration}**: ${count} mentions`);
+          });
+          output.push("");
         }
-      });
-      
-      return formatSuccessResponse(output.join('\n'));
+        
+        // Add error samples
+        if (errorSamples.length > 0) {
+          output.push("## Recent Error Samples:");
+          errorSamples.forEach(error => {
+            output.push(`- ${error}`);
+          });
+          output.push("");
+        }
+        
+        // Add warning samples
+        if (warningSamples.length > 0) {
+          output.push("## Recent Warning Samples:");
+          warningSamples.forEach(warning => {
+            output.push(`- ${warning}`);
+          });
+          output.push("");
+        }
+        
+        // Add recommendations
+        output.push("## Recommendations:");
+        if (errorCount > 50) {
+          output.push("- ⚠️ High number of errors detected. Consider reviewing your configuration.");
+        }
+        if (warningCount > 100) {
+          output.push("- ⚠️ Many warnings found. Some may indicate configuration issues.");
+        }
+        
+        const topIntegration = Object.entries(integrationMentions)[0];
+        if (topIntegration && topIntegration[1] > 10) {
+          output.push(`- 🔍 The ${topIntegration[0]} integration appears frequently in logs. Consider investigating.`);
+        }
+        
+        if (errorCount === 0 && warningCount === 0) {
+          output.push("- ✅ No errors or warnings found. System appears healthy!");
+        }
+        
+        return formatSuccessResponse(output.join('\n'));
+        
+      } catch (error: any) {
+        return formatErrorResponse(`Error analyzing log: ${error.message}`);
+      }
     }
   );
 
@@ -70,7 +276,11 @@ export function registerHistoryTools(server: McpServer) {
       start_time: z.string().optional().describe("Start time in ISO format"),
       end_time: z.string().optional().describe("End time in ISO format")
     },
-    async ({ entity_id, start_time, end_time }) => {  
+    async ({ entity_id, start_time, end_time }: {
+      entity_id?: string;
+      start_time?: string;
+      end_time?: string;
+    }) => {  
       const result = await getLogbook(entity_id, start_time, end_time);
       
       if (!result.success) {
@@ -129,42 +339,6 @@ export function registerHistoryTools(server: McpServer) {
           output.push(`  Listeners: ${event.listener_count}`);
         }
       });
-      
-      return formatSuccessResponse(output.join('\n'));
-    }
-  );
-
-  // Tool to get error log
-  server.tool(
-    "homeassistant_get_error_log",  
-    "Get the Home Assistant error log",
-    {},
-    async () => {  
-      const result = await getErrorLog();
-      
-      if (!result.success) {
-        return formatErrorResponse(`Failed to get error log: ${result.message}`);
-      }
-      
-      const errorLog = result.data;
-      
-      if (!errorLog || errorLog.trim().length === 0) {
-        return formatSuccessResponse("No errors in the log ✅");
-      }
-      
-      // Split log into lines and show last 50 lines
-      const lines = errorLog.split('\n').filter((line: string) => line.trim().length > 0);
-      const recentLines = lines.slice(-50);
-      
-      const output = [
-        `Error Log (showing last ${recentLines.length} lines):`,
-        "",
-        ...recentLines
-      ];
-      
-      if (lines.length > 50) {
-        output.splice(2, 0, `... ${lines.length - 50} earlier lines omitted`, "");
-      }
       
       return formatSuccessResponse(output.join('\n'));
     }

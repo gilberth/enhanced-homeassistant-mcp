@@ -3,7 +3,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   getAllStates,
   getHomeAssistantState,
-  makeGetRequest,
   formatErrorResponse,
   formatSuccessResponse
 } from "../../utils/api.js";
@@ -25,514 +24,400 @@ const DOMAIN_IMPORTANT_ATTRIBUTES: { [key: string]: string[] } = {
 };
 
 /**
- * Filter entity data to only include requested fields
+ * Register resource-related tools for Home Assistant
  */
-function filterFields(data: any, fields: string[]): any {
-  if (!fields || fields.length === 0) {
-    return data;
-  }
-
-  const result: any = { entity_id: data.entity_id };
-
-  for (const field of fields) {
-    if (field === "state") {
-      result.state = data.state;
-    } else if (field === "attributes") {
-      result.attributes = data.attributes || {};
-    } else if (field.startsWith("attr.") && field.length > 5) {
-      const attrName = field.substring(5);
-      const attributes = data.attributes || {};
-      if (attrName in attributes) {
-        if (!result.attributes) {
-          result.attributes = {};
-        }
-        result.attributes[attrName] = attributes[attrName];
-      }
-    } else if (field === "context") {
-      if (data.context) {
-        result.context = data.context;
-      }
-    } else if (["last_updated", "last_changed"].includes(field)) {
-      if (data[field]) {
-        result[field] = data[field];
-      }
-    }
-  }
-
-  return result;
-}
-
-/**
- * Get lean fields for a specific domain
- */
-function getLeanFields(domain: string): string[] {
-  const leanFields = ["entity_id", "state", "attr.friendly_name"];
-  
-  if (DOMAIN_IMPORTANT_ATTRIBUTES[domain]) {
-    for (const attr of DOMAIN_IMPORTANT_ATTRIBUTES[domain]) {
-      leanFields.push(`attr.${attr}`);
-    }
-  }
-  
-  return leanFields;
-}
-
-/**
- * Register MCP resources for Home Assistant data
- */
-export function registerResources(server: McpServer) {
-  // Resource for individual entity information
-  server.resource(
-    "hass://entities/{entity_id}",
-    "Get the state of a Home Assistant entity as a resource",
-    async ({ entity_id }) => {
-      const result = await getHomeAssistantState(entity_id);
+export function registerResourceTools(server: McpServer) {
+  // Tool to get specific resource by URI
+  server.tool(
+    "homeassistant_get_resource",
+    "Get a specific Home Assistant resource by URI",
+    {
+      uri: z.string().describe("The resource URI (e.g., 'hass://entities/light.living_room', 'hass://entities/domain/light')")
+    },
+    async ({ uri }: { uri: string }) => {
+      console.error(`Getting resource: ${uri}`);
       
-      if (!result.success) {
-        return {
-          contents: [{
-            type: "text",
-            text: `# Entity: ${entity_id}\n\nError retrieving entity: ${result.message}`
-          }]
-        };
-      }
-
-      const entity = result.data;
-      const domain = entity_id.split('.')[0];
-      
-      // Apply lean filtering
-      const leanFields = getLeanFields(domain);
-      const filteredEntity = filterFields(entity, leanFields);
-      
-      let content = `# Entity: ${entity_id}\n\n`;
-      
-      // Get friendly name if available
-      const friendlyName = filteredEntity.attributes?.friendly_name;
-      if (friendlyName && friendlyName !== entity_id) {
-        content += `**Name**: ${friendlyName}\n\n`;
-      }
-      
-      // Add state
-      content += `**State**: ${filteredEntity.state}\n\n`;
-      
-      // Add domain info
-      content += `**Domain**: ${domain}\n\n`;
-      
-      // Add key attributes
-      if (filteredEntity.attributes && Object.keys(filteredEntity.attributes).length > 0) {
-        content += "## Key Attributes\n\n";
+      try {
+        // Parse the URI to determine resource type
+        const url = new URL(uri);
+        const pathParts = url.pathname.split('/').filter(p => p);
         
-        Object.entries(filteredEntity.attributes).forEach(([key, value]) => {
-          if (key !== 'friendly_name') {
-            if (typeof value === 'object' && value !== null) {
-              content += `- **${key}**: *[Complex data]*\n`;
-            } else {
-              content += `- **${key}**: ${value}\n`;
-            }
+        if (url.protocol !== 'hass:') {
+          return formatErrorResponse(`Invalid protocol. Must use 'hass:' protocol`);
+        }
+        
+        // Handle different resource types
+        if (pathParts[0] === 'entities') {
+          if (pathParts.length === 1) {
+            // hass://entities - all entities overview
+            return await handleAllEntitiesResource();
+          } else if (pathParts.length === 2) {
+            // hass://entities/{entity_id} - specific entity
+            const entityId = pathParts[1];
+            return await handleEntityResource(entityId, false);
+          } else if (pathParts.length === 3 && pathParts[2] === 'detailed') {
+            // hass://entities/{entity_id}/detailed - detailed entity view
+            const entityId = pathParts[1];
+            return await handleEntityResource(entityId, true);
+          } else if (pathParts.length === 3 && pathParts[1] === 'domain') {
+            // hass://entities/domain/{domain} - domain entities
+            const domain = pathParts[2];
+            return await handleDomainResource(domain);
+          } else if (pathParts.length === 4 && pathParts[1] === 'domain' && pathParts[3] === 'summary') {
+            // hass://entities/domain/{domain}/summary - domain summary
+            const domain = pathParts[2];
+            return await handleDomainSummaryResource(domain);
           }
-        });
-        content += "\n";
+        } else if (pathParts[0] === 'search') {
+          if (pathParts.length >= 2) {
+            // hass://search/{query}/{limit?} - entity search
+            const query = decodeURIComponent(pathParts[1]);
+            const limit = pathParts.length > 2 ? parseInt(pathParts[2]) || 20 : 20;
+            return await handleSearchResource(query, limit);
+          }
+        }
+        
+        return formatErrorResponse(`Unknown resource URI pattern: ${uri}`);
+        
+      } catch (error: any) {
+        return formatErrorResponse(`Error processing resource URI: ${error.message}`);
       }
-      
-      // Add last updated time if available
-      if (entity.last_updated) {
-        content += `**Last Updated**: ${entity.last_updated}\n`;
-      }
-      
-      return {
-        contents: [{
-          type: "text",
-          text: content
-        }]
-      };
     }
   );
 
-  // Resource for detailed entity information
-  server.resource(
-    "hass://entities/{entity_id}/detailed",
-    "Get detailed information about a Home Assistant entity with all attributes",
-    async ({ entity_id }) => {
-      const result = await getHomeAssistantState(entity_id);
+  // Tool to list available resources
+  server.tool(
+    "homeassistant_list_resources",
+    "List all available Home Assistant resources with their URIs",
+    {},
+    async () => {
+      const resources = [
+        {
+          uri: "hass://entities",
+          description: "All entities overview with domain grouping",
+          note: "Large response - consider using domain-specific or search resources"
+        },
+        {
+          uri: "hass://entities/{entity_id}",
+          description: "Individual entity state and key attributes",
+          example: "hass://entities/light.living_room"
+        },
+        {
+          uri: "hass://entities/{entity_id}/detailed",
+          description: "Complete entity information including all attributes",
+          example: "hass://entities/light.living_room/detailed"
+        },
+        {
+          uri: "hass://entities/domain/{domain}",
+          description: "All entities in a specific domain",
+          example: "hass://entities/domain/light"
+        },
+        {
+          uri: "hass://entities/domain/{domain}/summary",
+          description: "Statistical summary of entities in a domain",
+          example: "hass://entities/domain/sensor/summary"
+        },
+        {
+          uri: "hass://search/{query}/{limit}",
+          description: "Search entities by ID, name, or state (limit optional, default 20)",
+          example: "hass://search/living%20room/10"
+        }
+      ];
       
-      if (!result.success) {
-        return {
-          contents: [{
-            type: "text",
-            text: `# Entity: ${entity_id} (Detailed)\n\nError retrieving entity: ${result.message}`
-          }]
-        };
-      }
+      let content = "# Available Home Assistant Resources\n\n";
+      
+      resources.forEach((resource, index) => {
+        content += `## ${index + 1}. ${resource.uri}\n\n`;
+        content += `**Description**: ${resource.description}\n\n`;
+        
+        if ((resource as any).example) {
+          content += `**Example**: \`${(resource as any).example}\`\n\n`;
+        }
+        
+        if ((resource as any).note) {
+          content += `**Note**: ${(resource as any).note}\n\n`;
+        }
+      });
+      
+      content += "## Usage Tips\n\n";
+      content += "- Use specific entity URIs for best performance\n";
+      content += "- Domain resources are efficient for exploring entity types\n";
+      content += "- Search resources support URL encoding for special characters\n";
+      content += "- Detailed views provide complete information but use more tokens\n";
+      
+      return formatSuccessResponse(content);
+    }
+  );
 
-      const entity = result.data;
-      const domain = entity_id.split('.')[0];
-      
-      let content = `# Entity: ${entity_id} (Detailed)\n\n`;
-      
-      // Get friendly name if available
-      const friendlyName = entity.attributes?.friendly_name;
-      if (friendlyName && friendlyName !== entity_id) {
-        content += `**Name**: ${friendlyName}\n\n`;
+  // Helper functions for resource handling
+  async function handleAllEntitiesResource() {
+    const result = await getAllStates();
+    
+    if (!result.success) {
+      return formatErrorResponse(`Error retrieving entities: ${result.message}`);
+    }
+    
+    const entities = result.data;
+    
+    let content = "# Home Assistant Entities Overview\n\n";
+    content += `Total entities: ${entities.length}\n\n`;
+    content += "⚠️ **Performance Note**: This is a complete entity list. For better performance, consider:\n";
+    content += "- Domain filtering: `hass://entities/domain/{domain}`\n";
+    content += "- Entity search: `hass://search/{query}`\n";
+    content += "- Specific entities: `hass://entities/{entity_id}`\n\n";
+    
+    // Group entities by domain
+    const domains: { [key: string]: any[] } = {};
+    entities.forEach((entity: any) => {
+      const domain = entity.entity_id.split('.')[0];
+      if (!domains[domain]) {
+        domains[domain] = [];
       }
+      domains[domain].push(entity);
+    });
+    
+    Object.entries(domains).sort(([a], [b]) => a.localeCompare(b)).forEach(([domain, domainEntities]) => {
+      content += `## ${domain.toUpperCase()} (${domainEntities.length} entities)\n\n`;
       
-      // Add state
-      content += `**State**: ${entity.state}\n\n`;
+      // Show first 5 entities of each domain
+      domainEntities.slice(0, 5).forEach(entity => {
+        const name = entity.attributes?.friendly_name || entity.entity_id;
+        content += `- **${entity.entity_id}**: ${entity.state} (${name})\n`;
+      });
       
-      // Add domain info
-      content += `**Domain**: ${domain}\n\n`;
-      
-      // Add all attributes
-      if (entity.attributes && Object.keys(entity.attributes).length > 0) {
-        content += "## All Attributes\n\n";
-        
-        // Sort attributes for better organization
-        const sortedAttrs = Object.entries(entity.attributes).sort(([a], [b]) => a.localeCompare(b));
-        
-        sortedAttrs.forEach(([key, value]) => {
-          if (typeof value === 'object' && value !== null) {
-            content += `- **${key}**:\n\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\`\n`;
-          } else {
-            content += `- **${key}**: ${value}\n`;
-          }
+      if (domainEntities.length > 5) {
+        content += `- ... and ${domainEntities.length - 5} more ${domain} entities\n`;
+        content += `- [View all ${domain} entities](hass://entities/domain/${domain})\n`;
+      }
+      content += "\n";
+    });
+    
+    return formatSuccessResponse(content);
+  }
+
+  async function handleEntityResource(entityId: string, detailed: boolean) {
+    const result = await getHomeAssistantState(entityId);
+    
+    if (!result.success) {
+      return formatErrorResponse(`Error retrieving entity ${entityId}: ${result.message}`);
+    }
+    
+    const entity = result.data;
+    const domain = entityId.split(".")[0];
+    
+    let content = `# Entity: ${entityId}${detailed ? ' (Detailed)' : ''}\n\n`;
+    
+    const friendlyName = entity.attributes?.friendly_name;
+    if (friendlyName && friendlyName !== entityId) {
+      content += `**Name**: ${friendlyName}\n\n`;
+    }
+    
+    content += `**State**: ${entity.state}\n`;
+    content += `**Domain**: ${domain}\n\n`;
+    
+    if (detailed) {
+      content += "## All Attributes\n\n";
+      const attributes = entity.attributes || {};
+      if (Object.keys(attributes).length > 0) {
+        Object.entries(attributes).forEach(([key, value]) => {
+          content += `- **${key}**: ${JSON.stringify(value)}\n`;
         });
-        content += "\n";
+      } else {
+        content += "*No attributes available*\n";
       }
       
-      // Add context data section
-      content += "## Context Data\n\n";
-      
+      content += "\n## Context Information\n\n";
       if (entity.last_updated) {
         content += `**Last Updated**: ${entity.last_updated}\n`;
       }
-      
       if (entity.last_changed) {
         content += `**Last Changed**: ${entity.last_changed}\n`;
       }
+    } else {
+      content += "## Key Attributes\n\n";
+      const attributes = entity.attributes || {};
+      const importantAttrs = DOMAIN_IMPORTANT_ATTRIBUTES[domain] || [];
       
-      if (entity.context) {
-        content += `**Context ID**: ${entity.context.id}\n`;
-        if (entity.context.user_id) {
-          content += `**User ID**: ${entity.context.user_id}\n`;
+      let displayedAttrs = 0;
+      for (const attrName of importantAttrs) {
+        if (attributes[attrName] !== undefined) {
+          content += `- **${attrName}**: ${JSON.stringify(attributes[attrName])}\n`;
+          displayedAttrs++;
         }
       }
       
-      return {
-        contents: [{
-          type: "text",
-          text: content
-        }]
-      };
+      if (displayedAttrs === 0) {
+        content += "*No key attributes for this entity type*\n";
+      }
+      
+      content += `\n[View detailed information](hass://entities/${entityId}/detailed)\n`;
     }
-  );
+    
+    return formatSuccessResponse(content);
+  }
 
-  // Resource for all entities
-  server.resource(
-    "hass://entities",
-    "Get a list of all Home Assistant entities grouped by domain",
-    async () => {
-      const result = await getAllStates();
+  async function handleDomainResource(domain: string) {
+    const result = await getAllStates();
+    
+    if (!result.success) {
+      return formatErrorResponse(`Error retrieving entities: ${result.message}`);
+    }
+    
+    const allEntities = result.data;
+    const entities = allEntities.filter((entity: any) => 
+      entity.entity_id.startsWith(`${domain}.`)
+    );
+    
+    if (entities.length === 0) {
+      return formatErrorResponse(`No entities found for domain: ${domain}`);
+    }
+    
+    let content = `# ${domain.charAt(0).toUpperCase() + domain.slice(1)} Domain Entities\n\n`;
+    content += `Total entities: ${entities.length}\n\n`;
+    
+    entities.forEach((entity: any) => {
+      const name = entity.attributes?.friendly_name || entity.entity_id;
+      content += `## ${entity.entity_id}\n`;
+      content += `- **Name**: ${name}\n`;
+      content += `- **State**: ${entity.state}\n`;
       
-      if (!result.success) {
-        return {
-          contents: [{
-            type: "text",
-            text: `Error retrieving entities: ${result.message}`
-          }]
-        };
-      }
-
-      const entities = result.data;
-      
-      let content = "# Home Assistant Entities\n\n";
-      content += `Total entities: ${entities.length}\n\n`;
-      content += "⚠️ **Note**: For better performance and token efficiency, consider using:\n";
-      content += "- Domain filtering: `hass://entities/domain/{domain}`\n";
-      content += "- Entity search: `hass://search/{query}`\n\n";
-      
-      // Group entities by domain
-      const domains: { [key: string]: any[] } = {};
-      entities.forEach((entity: any) => {
-        const domain = entity.entity_id.split('.')[0];
-        if (!domains[domain]) {
-          domains[domain] = [];
+      // Add important attributes for this domain
+      const importantAttrs = DOMAIN_IMPORTANT_ATTRIBUTES[domain] || [];
+      importantAttrs.forEach(attr => {
+        if (entity.attributes?.[attr] !== undefined) {
+          content += `- **${attr}**: ${entity.attributes[attr]}\n`;
         }
-        domains[domain].push(entity);
       });
+      content += "\n";
+    });
+    
+    content += `## Related Resources\n\n`;
+    content += `- [Domain summary](hass://entities/domain/${domain}/summary)\n`;
+    content += `- [Search in this domain](hass://search/${domain}/20)\n`;
+    
+    return formatSuccessResponse(content);
+  }
+
+  async function handleDomainSummaryResource(domain: string) {
+    const result = await getAllStates();
+    
+    if (!result.success) {
+      return formatErrorResponse(`Error retrieving entities: ${result.message}`);
+    }
+    
+    const allEntities = result.data;
+    const entities = allEntities.filter((entity: any) => 
+      entity.entity_id.startsWith(`${domain}.`)
+    );
+    
+    if (entities.length === 0) {
+      return formatErrorResponse(`No entities found for domain: ${domain}`);
+    }
+    
+    // Analyze the domain
+    const stateCounts: { [key: string]: number } = {};
+    const attributesSummary: { [key: string]: Set<any> } = {};
+    
+    entities.forEach((entity: any) => {
+      const state = entity.state || "unknown";
+      stateCounts[state] = (stateCounts[state] || 0) + 1;
       
-      // Build the string with entities grouped by domain
-      Object.keys(domains).sort().forEach(domain => {
-        const domainEntities = domains[domain];
-        content += `## ${domain.charAt(0).toUpperCase() + domain.slice(1)} (${domainEntities.length})\n\n`;
-        
-        domainEntities.sort((a, b) => a.entity_id.localeCompare(b.entity_id)).forEach(entity => {
-          const friendlyName = entity.attributes?.friendly_name;
-          content += `- **${entity.entity_id}**: ${entity.state}`;
-          if (friendlyName && friendlyName !== entity.entity_id) {
-            content += ` (${friendlyName})`;
+      if (entity.attributes) {
+        Object.entries(entity.attributes).forEach(([key, value]) => {
+          if (!attributesSummary[key]) {
+            attributesSummary[key] = new Set();
           }
-          content += "\n";
-        });
-        content += "\n";
-      });
-      
-      return {
-        contents: [{
-          type: "text",
-          text: content
-        }]
-      };
-    }
-  );
-
-  // Resource for domain-specific entities
-  server.resource(
-    "hass://entities/domain/{domain}",
-    "Get a list of entities for a specific domain",
-    async ({ domain }) => {
-      const result = await getAllStates();
-      
-      if (!result.success) {
-        return {
-          contents: [{
-            type: "text",
-            text: `Error retrieving entities: ${result.message}`
-          }]
-        };
-      }
-
-      const allEntities = result.data;
-      const entities = allEntities.filter((entity: any) => 
-        entity.entity_id.startsWith(`${domain}.`)
-      );
-      
-      if (entities.length === 0) {
-        return {
-          contents: [{
-            type: "text",
-            text: `# ${domain.charAt(0).toUpperCase() + domain.slice(1)} Entities\n\nNo entities found for domain: ${domain}`
-          }]
-        };
-      }
-      
-      // Apply lean filtering
-      const leanFields = getLeanFields(domain);
-      const filteredEntities = entities.map((entity: any) => filterFields(entity, leanFields));
-      
-      let content = `# ${domain.charAt(0).toUpperCase() + domain.slice(1)} Entities\n\n`;
-      content += `Found ${entities.length} entities:\n\n`;
-      
-      filteredEntities.sort((a, b) => a.entity_id.localeCompare(b.entity_id)).forEach(entity => {
-        const friendlyName = entity.attributes?.friendly_name;
-        content += `- **${entity.entity_id}**: ${entity.state}`;
-        if (friendlyName && friendlyName !== entity.entity_id) {
-          content += ` (${friendlyName})`;
-        }
-        content += "\n";
-      });
-      
-      content += `\n## Related Resources\n\n`;
-      content += `- [View domain summary](hass://domain/${domain}/summary)\n`;
-      
-      return {
-        contents: [{
-          type: "text",
-          text: content
-        }]
-      };
-    }
-  );
-
-  // Resource for entity search
-  server.resource(
-    "hass://search/{query}",
-    "Search for entities matching a query string",
-    async ({ query }) => {
-      if (!query || query.trim() === '') {
-        return {
-          contents: [{
-            type: "text",
-            text: "# Entity Search\n\nError: No search query provided"
-          }]
-        };
-      }
-
-      const result = await getAllStates();
-      
-      if (!result.success) {
-        return {
-          contents: [{
-            type: "text",
-            text: `Error retrieving entities: ${result.message}`
-          }]
-        };
-      }
-
-      const allEntities = result.data;
-      const searchTerm = query.toLowerCase();
-      
-      // Search entities
-      const matchingEntities = allEntities.filter((entity: any) => {
-        const entityIdMatch = entity.entity_id.toLowerCase().includes(searchTerm);
-        const nameMatch = entity.attributes?.friendly_name?.toLowerCase().includes(searchTerm);
-        const stateMatch = entity.state?.toLowerCase().includes(searchTerm);
-        
-        return entityIdMatch || nameMatch || stateMatch;
-      });
-      
-      if (matchingEntities.length === 0) {
-        return {
-          contents: [{
-            type: "text",
-            text: `# Entity Search Results for '${query}'\n\nNo entities found matching "${query}"`
-          }]
-        };
-      }
-      
-      // Apply lean filtering and group by domain
-      const domains: { [key: string]: any[] } = {};
-      matchingEntities.forEach((entity: any) => {
-        const domain = entity.entity_id.split('.')[0];
-        const leanFields = getLeanFields(domain);
-        const filteredEntity = filterFields(entity, leanFields);
-        
-        if (!domains[domain]) {
-          domains[domain] = [];
-        }
-        domains[domain].push(filteredEntity);
-      });
-      
-      let content = `# Entity Search Results for '${query}'\n\n`;
-      content += `Found ${matchingEntities.length} matching entities:\n\n`;
-      
-      // Build results grouped by domain
-      Object.keys(domains).sort().forEach(domain => {
-        const domainEntities = domains[domain];
-        content += `## ${domain.charAt(0).toUpperCase() + domain.slice(1)} (${domainEntities.length})\n\n`;
-        
-        domainEntities.sort((a, b) => a.entity_id.localeCompare(b.entity_id)).forEach(entity => {
-          const friendlyName = entity.attributes?.friendly_name;
-          content += `- **${entity.entity_id}**: ${entity.state}`;
-          if (friendlyName && friendlyName !== entity.entity_id) {
-            content += ` (${friendlyName})`;
+          if (value !== null && value !== undefined) {
+            attributesSummary[key].add(typeof value === 'object' ? JSON.stringify(value) : value);
           }
-          content += "\n";
         });
-        content += "\n";
-      });
+      }
+    });
+    
+    let content = `# ${domain.charAt(0).toUpperCase() + domain.slice(1)} Domain Summary\n\n`;
+    content += `**Total entities**: ${entities.length}\n\n`;
+    
+    // State distribution
+    content += "## State Distribution\n\n";
+    Object.entries(stateCounts).forEach(([state, count]) => {
+      const percentage = ((count / entities.length) * 100).toFixed(1);
+      content += `- **${state}**: ${count} entities (${percentage}%)\n`;
+    });
+    
+    // Common attributes
+    content += "\n## Common Attributes\n\n";
+    const sortedAttributes = Object.entries(attributesSummary)
+      .sort(([, a], [, b]) => b.size - a.size)
+      .slice(0, 10);
       
-      return {
-        contents: [{
-          type: "text",
-          text: content
-        }]
-      };
-    }
-  );
+    sortedAttributes.forEach(([attr, values]) => {
+      const valueCount = values.size;
+      content += `- **${attr}**: ${valueCount} unique values\n`;
+      
+      if (valueCount <= 5) {
+        const valuesList = Array.from(values).slice(0, 5);
+        content += `  Values: ${valuesList.join(', ')}\n`;
+      }
+    });
+    
+    content += `\n## Related Resources\n\n`;
+    content += `- [View all ${domain} entities](hass://entities/domain/${domain})\n`;
+    content += `- [Search ${domain} entities](hass://search/${domain}/20)\n`;
+    
+    return formatSuccessResponse(content);
+  }
 
-  // Resource for domain summary
-  server.resource(
-    "hass://domain/{domain}/summary",
-    "Get a summary of entities in a domain",
-    async ({ domain }) => {
-      const result = await getAllStates();
-      
-      if (!result.success) {
-        return {
-          contents: [{
-            type: "text",
-            text: `Error retrieving entities: ${result.message}`
-          }]
-        };
-      }
-
-      const allEntities = result.data;
-      const entities = allEntities.filter((entity: any) => 
-        entity.entity_id.startsWith(`${domain}.`)
-      );
-      
-      if (entities.length === 0) {
-        return {
-          contents: [{
-            type: "text",
-            text: `# ${domain.charAt(0).toUpperCase() + domain.slice(1)} Domain Summary\n\nNo entities found for domain: ${domain}`
-          }]
-        };
-      }
-      
-      // Generate summary statistics
-      const totalCount = entities.length;
-      const stateCounts: { [key: string]: number } = {};
-      const stateExamples: { [key: string]: any[] } = {};
-      const attributesSummary: { [key: string]: number } = {};
-      
-      entities.forEach(entity => {
-        const state = entity.state || 'unknown';
-        
-        // Count states
-        if (!stateCounts[state]) {
-          stateCounts[state] = 0;
-          stateExamples[state] = [];
-        }
-        stateCounts[state]++;
-        
-        // Add examples (up to 3 per state)
-        if (stateExamples[state].length < 3) {
-          stateExamples[state].push({
-            entity_id: entity.entity_id,
-            friendly_name: entity.attributes?.friendly_name || entity.entity_id
-          });
-        }
-        
-        // Collect attribute keys for summary
-        Object.keys(entity.attributes || {}).forEach(attrKey => {
-          if (!attributesSummary[attrKey]) {
-            attributesSummary[attrKey] = 0;
-          }
-          attributesSummary[attrKey]++;
-        });
-      });
-      
-      let content = `# ${domain.charAt(0).toUpperCase() + domain.slice(1)} Domain Summary\n\n`;
-      content += `**Total Entities**: ${totalCount}\n\n`;
-      
-      // State distribution
-      content += "## State Distribution\n\n";
-      Object.entries(stateCounts).sort(([,a], [,b]) => b - a).forEach(([state, count]) => {
-        content += `- **${state}**: ${count} entities\n`;
-        
-        // Show examples
-        const examples = stateExamples[state];
-        if (examples.length > 0) {
-          examples.forEach(example => {
-            content += `  - ${example.entity_id}`;
-            if (example.friendly_name !== example.entity_id) {
-              content += ` (${example.friendly_name})`;
-            }
-            content += "\n";
-          });
-        }
-        content += "\n";
-      });
-      
-      // Common attributes
-      const commonAttributes = Object.entries(attributesSummary)
-        .sort(([,a], [,b]) => b - a)
-        .slice(0, 10);
-      
-      if (commonAttributes.length > 0) {
-        content += "## Common Attributes\n\n";
-        commonAttributes.forEach(([attr, count]) => {
-          const percentage = Math.round((count / totalCount) * 100);
-          content += `- **${attr}**: ${count}/${totalCount} entities (${percentage}%)\n`;
-        });
-      }
-      
-      return {
-        contents: [{
-          type: "text",
-          text: content
-        }]
-      };
+  async function handleSearchResource(query: string, limit: number) {
+    if (!query || query.trim() === "") {
+      return formatErrorResponse("Please provide a search query");
     }
-  );
+    
+    const result = await getAllStates();
+    
+    if (!result.success) {
+      return formatErrorResponse(`Error searching entities: ${result.message}`);
+    }
+    
+    const searchTerm = query.toLowerCase().trim();
+    const matchingEntities = result.data.filter((entity: any) => {
+      const entityId = entity.entity_id.toLowerCase();
+      const friendlyName = (entity.attributes?.friendly_name || "").toLowerCase();
+      const state = (entity.state || "").toLowerCase();
+      
+      return entityId.includes(searchTerm) || 
+             friendlyName.includes(searchTerm) || 
+             state.includes(searchTerm);
+    }).slice(0, limit);
+    
+    if (matchingEntities.length === 0) {
+      return formatSuccessResponse(`No entities found matching: '${query}'`);
+    }
+    
+    let content = `# Search Results for '${query}'\n\n`;
+    content += `Found ${matchingEntities.length} matching entities (limit: ${limit}):\n\n`;
+    
+    // Group by domain
+    const domains: { [key: string]: any[] } = {};
+    matchingEntities.forEach((entity: any) => {
+      const domain = entity.entity_id.split('.')[0];
+      if (!domains[domain]) {
+        domains[domain] = [];
+      }
+      domains[domain].push(entity);
+    });
+    
+    Object.entries(domains).forEach(([domain, domainEntities]) => {
+      content += `## ${domain.toUpperCase()} (${domainEntities.length})\n\n`;
+      domainEntities.forEach(entity => {
+        const name = entity.attributes?.friendly_name || entity.entity_id;
+        content += `- [${entity.entity_id}](hass://entities/${entity.entity_id}): ${entity.state}\n`;
+        if (name !== entity.entity_id) {
+          content += `  Name: ${name}\n`;
+        }
+      });
+      content += "\n";
+    });
+    
+    return formatSuccessResponse(content);
+  }
 }

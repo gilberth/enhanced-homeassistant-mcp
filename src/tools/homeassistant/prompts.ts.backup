@@ -1,0 +1,302 @@
+import { z } from "zod";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  getAllStates,
+  makeGetRequest,
+  formatErrorResponse,
+  formatSuccessResponse
+} from "../../utils/api.js";
+
+/**
+ * Register MCP prompts for guided conversations
+ */
+export function registerPrompts(server: McpServer) {
+  // Prompt for creating automations
+  server.prompt(
+    "create_automation",
+    "Guide for creating Home Assistant automations based on trigger type",
+    {
+      trigger_type: z.enum(["time", "state", "motion", "device", "webhook"]).describe("Type of automation trigger")
+    },
+    ({ trigger_type }: { trigger_type: "time" | "state" | "motion" | "device" | "webhook" }) => {
+      const systemMessage = `You are a Home Assistant automation expert specializing in ${trigger_type} automations.
+
+You'll help the user create effective automations by:
+1. Understanding their specific use case and requirements
+2. Suggesting appropriate triggers, conditions, and actions
+3. Providing YAML configuration examples
+4. Explaining best practices for ${trigger_type}-based automations
+5. Helping with testing and troubleshooting
+6. Recommending complementary automations that work well together`;
+
+      const userMessage = `I want to create a ${trigger_type}-based automation in Home Assistant. Can you help me design and implement it?
+
+Context: ${systemMessage}`;
+
+      return {
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: userMessage
+            }
+          }
+        ]
+      };
+    }
+  );
+
+  // Prompt for debugging automations (from Python debug_automation)
+  server.prompt(
+    "debug_automation",
+    "Help a user troubleshoot an automation that isn't working",
+    {
+      automation_id: z.string().describe("The automation entity ID or friendly name to debug")
+    },
+    ({ automation_id }: { automation_id: string }) => {
+      const message = `I need help troubleshooting my automation ${automation_id} that isn't working properly.
+
+Please help me diagnose problems by checking:
+1. Trigger conditions and whether they're being met
+2. Conditions that might be preventing execution
+3. Action configuration issues
+4. Entity availability and connectivity
+5. Permissions and scope issues
+
+Use the available tools to check entity states, automation details, and logs. Ask systematic questions to identify the root cause.`;
+
+      return {
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: message
+            }
+          }
+        ]
+      };
+    }
+  );
+
+  // Prompt for troubleshooting entities (from Python troubleshoot_entity)
+  server.prompt(
+    "troubleshoot_entity",
+    "Guide a user through troubleshooting issues with an entity",
+    {
+      entity_id: z.string().describe("The entity ID that needs troubleshooting")
+    },
+    ({ entity_id }) => {
+      return {
+        messages: [
+          {
+            role: "system",
+            content: {
+              type: "text",
+              text: `You are a Home Assistant entity troubleshooting expert.
+You'll help the user diagnose problems with their entity by checking:
+1. Entity status and availability
+2. Integration status
+3. Device connectivity
+4. Recent state changes and error patterns
+5. Configuration issues
+6. Common problems with this entity type
+
+Start by using the get_entity_state tool to check the current status of ${entity_id}.`
+            }
+          },
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: `My entity ${entity_id} isn't working properly. Can you help me troubleshoot it?`
+            }
+          }
+        ]
+      };
+    }
+  );
+
+  // Prompt for routine optimization (from Python routine_optimizer)
+  server.prompt(
+    "routine_optimizer",
+    "Analyze usage patterns and suggest optimized routines based on actual behavior",
+    {},
+    () => {
+      return {
+        messages: [
+          {
+            role: "system",
+            content: {
+              type: "text",
+              text: `You are a Home Assistant optimization expert specializing in routine analysis.
+You'll help the user analyze their usage patterns and create optimized routines by:
+1. Using history tools to review entity state patterns
+2. Analyzing when lights, climate controls, and other devices are used
+3. Finding correlations between different device usages
+4. Suggesting automations based on detected routines
+5. Optimizing existing automations to better match actual usage
+6. Creating schedules that adapt to the user's lifestyle
+7. Identifying energy-saving opportunities based on usage patterns
+
+Start by asking about their daily routines and then use the available tools to analyze usage patterns.`
+            }
+          },
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: "I'd like to optimize my home automations based on my actual usage patterns. Can you help analyze how I use my smart home and suggest better routines?"
+            }
+          }
+        ]
+      };
+    }
+  );
+
+  // Prompt for automation health check (from Python automation_health_check)
+  server.prompt(
+    "automation_health_check",
+    "Review all automations, find conflicts, redundancies, or improvement opportunities",
+    {},
+    () => {
+      return {
+        messages: [
+          {
+            role: "system",
+            content: {
+              type: "text",
+              text: `You are a Home Assistant automation expert specializing in system optimization.
+You'll help the user perform a comprehensive audit of their automations by:
+1. Using list_automations tool to review all automations
+2. Identifying potential conflicts (e.g., opposing actions)
+3. Finding redundant automations that could be consolidated
+4. Detecting inefficient trigger patterns
+5. Suggesting missing conditions that could improve reliability
+6. Recommending structural improvements
+7. Highlighting best practices
+
+Start by using the list_automations tool to get an overview of their current setup.`
+            }
+          },
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: "I'd like to do a health check on all my Home Assistant automations. Can you help me review them for conflicts, redundancies, and potential improvements?"
+            }
+          }
+        ]
+      };
+    }
+  );
+
+  // Prompt for entity naming consistency (from Python entity_naming_consistency)
+  server.prompt(
+    "entity_naming_consistency",
+    "Audit entity names and suggest standardization improvements",
+    {},
+    () => {
+      return {
+        messages: [
+          {
+            role: "system",
+            content: {
+              type: "text",
+              text: `You are a Home Assistant organization expert specializing in entity naming conventions.
+You'll help the user audit and improve their entity naming by:
+1. Using list_entities to analyze current naming patterns
+2. Identifying inconsistencies in entity IDs and friendly names
+3. Suggesting standardized naming schemes based on entity types and locations
+4. Creating clear guidelines for future entity naming
+5. Proposing specific name changes for better organization
+6. Explaining benefits of consistent naming
+
+Start by using the system_overview tool to understand their current entity structure.`
+            }
+          },
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: "I'd like to make my Home Assistant entity names more consistent and organized. Can you help me audit my current naming conventions and suggest improvements?"
+            }
+          }
+        ]
+      };
+    }
+  );
+
+  // Prompt for dashboard layout generation (from Python dashboard_layout_generator)
+  server.prompt(
+    "dashboard_layout_generator",
+    "Create optimized dashboards based on user preferences and usage patterns",
+    {},
+    () => {
+      return {
+        messages: [
+          {
+            role: "system",
+            content: {
+              type: "text",
+              text: `You are a Home Assistant UI design expert specializing in dashboard creation.
+You'll help the user create optimized dashboards by:
+1. Using domain_summary and system_overview tools to understand their entities
+2. Identifying logical groupings of entities (by room, function, or use case)
+3. Suggesting dashboard layouts with important controls prominently placed
+4. Creating specialized views for different contexts (mobile, tablet, wall-mounted)
+5. Recommending card types and layouts that enhance usability
+6. Balancing information density with visual clarity
+
+Start by understanding their current setup and usage patterns.`
+            }
+          },
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: "I'd like to redesign my Home Assistant dashboards to be more functional and user-friendly. Can you help me create optimized layouts based on how I actually use my system?"
+            }
+          }
+        ]
+      };
+    }
+  );
+
+  // Additional prompt for energy optimization
+  server.prompt(
+    "energy_optimization",
+    "Analyze energy usage and suggest optimization strategies",
+    {},
+    () => {
+      return {
+        messages: [
+          {
+            role: "system",
+            content: {
+              type: "text",
+              text: `You are a Home Assistant energy optimization expert.
+You'll help the user analyze and optimize their energy usage by:
+1. Using search and domain tools to find energy-related entities
+2. Analyzing energy monitoring data and usage patterns
+3. Identifying high-consumption devices and patterns
+4. Suggesting automation-based energy saving strategies
+5. Recommending scheduling optimizations
+6. Creating energy-aware automations
+
+Start by using search_entities to find energy, power, and consumption related entities.`
+            }
+          },
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: "I want to optimize my home's energy usage using Home Assistant. Can you help me analyze my energy consumption and create automations to reduce it?"
+            }
+          }
+        ]
+      };
+    }
+  );
+}

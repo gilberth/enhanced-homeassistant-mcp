@@ -1,0 +1,3003 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+The content has been processed where security check has been disabled.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Security check has been disabled - content may contain sensitive information
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.github/
+  workflows/
+    docker-build.yml
+app/
+  __main__.py
+  config.py
+  hass.py
+  server.py
+tests/
+  conftest.py
+  test_config.py
+  test_hass.py
+  test_server.py
+.dockerignore
+.env.example
+.gitignore
+.python-version
+Dockerfile
+LICENSE
+pyproject.toml
+pytest.ini
+README.md
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".github/workflows/docker-build.yml">
+name: ci
+
+on:
+  push: {}
+
+env:
+  DOCKER_IMAGE: voska/hass-mcp
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            # Always include git sha for immutable references
+            type=sha,format=long
+            # Set latest tag for default branch
+            type=raw,value=latest,enable={{is_default_branch}}
+            # Tag branch builds (e.g. master)
+            type=ref,event=branch
+            # Full version numbers for exact versions
+            type=semver,pattern={{version}}
+            # Major.minor for API compatibility
+            type=semver,pattern={{major}}.{{minor}}
+            # Major only for major version compatibility
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+</file>
+
+<file path="app/__main__.py">
+#!/usr/bin/env python
+"""Entry point for running Hass-MCP as a module"""
+
+from app.server import mcp
+
+
+def main():
+    """Run the MCP server with stdio communication"""
+    mcp.run()
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="app/config.py">
+import os
+from typing import Optional
+
+# Home Assistant configuration
+HA_URL: str = os.environ.get("HA_URL", "http://localhost:8123")
+HA_TOKEN: str = os.environ.get("HA_TOKEN", "")
+
+def get_ha_headers() -> dict:
+    """Return the headers needed for Home Assistant API requests"""
+    headers = {
+        "Content-Type": "application/json",
+    }
+    
+    # Only add Authorization header if token is provided
+    if HA_TOKEN:
+        headers["Authorization"] = f"Bearer {HA_TOKEN}"
+    
+    return headers
+</file>
+
+<file path="app/hass.py">
+import httpx
+from typing import Dict, Any, Optional, List, TypeVar, Callable, Awaitable, Union, cast
+import functools
+import inspect
+import logging
+
+from app.config import HA_URL, HA_TOKEN, get_ha_headers
+
+# Set up logging
+logger = logging.getLogger(__name__)
+
+# Define a generic type for our API function return values
+T = TypeVar('T')
+F = TypeVar('F', bound=Callable[..., Awaitable[Any]])
+
+# HTTP client
+_client: Optional[httpx.AsyncClient] = None
+
+# Default field sets for different verbosity levels
+# Lean fields for standard requests (optimized for token efficiency)
+DEFAULT_LEAN_FIELDS = ["entity_id", "state", "attr.friendly_name"]
+
+# Common fields that are typically needed for entity operations
+DEFAULT_STANDARD_FIELDS = ["entity_id", "state", "attributes", "last_updated"]
+
+# Domain-specific important attributes to include in lean responses
+DOMAIN_IMPORTANT_ATTRIBUTES = {
+    "light": ["brightness", "color_temp", "rgb_color", "supported_color_modes"],
+    "switch": ["device_class"],
+    "binary_sensor": ["device_class"],
+    "sensor": ["device_class", "unit_of_measurement", "state_class"],
+    "climate": ["hvac_mode", "current_temperature", "temperature", "hvac_action"],
+    "media_player": ["media_title", "media_artist", "source", "volume_level"],
+    "cover": ["current_position", "current_tilt_position"],
+    "fan": ["percentage", "preset_mode"],
+    "camera": ["entity_picture"],
+    "automation": ["last_triggered"],
+    "scene": [],
+    "script": ["last_triggered"],
+}
+
+def handle_api_errors(func: F) -> F:
+    """
+    Decorator to handle common error cases for Home Assistant API calls
+    
+    Args:
+        func: The async function to decorate
+        
+    Returns:
+        Wrapped function that handles errors
+    """
+    @functools.wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        # Determine return type from function annotation
+        return_type = inspect.signature(func).return_annotation
+        is_dict_return = 'Dict' in str(return_type)
+        is_list_return = 'List' in str(return_type)
+        
+        # Prepare error formatters based on return type
+        def format_error(msg: str) -> Any:
+            if is_dict_return:
+                return {"error": msg}
+            elif is_list_return:
+                return [{"error": msg}]
+            else:
+                return msg
+        
+        try:
+            # Check if token is available
+            if not HA_TOKEN:
+                return format_error("No Home Assistant token provided. Please set HA_TOKEN in .env file.")
+            
+            # Call the original function
+            return await func(*args, **kwargs)
+        except httpx.ConnectError:
+            return format_error(f"Connection error: Cannot connect to Home Assistant at {HA_URL}")
+        except httpx.TimeoutException:
+            return format_error(f"Timeout error: Home Assistant at {HA_URL} did not respond in time")
+        except httpx.HTTPStatusError as e:
+            return format_error(f"HTTP error: {e.response.status_code} - {e.response.reason_phrase}")
+        except httpx.RequestError as e:
+            return format_error(f"Error connecting to Home Assistant: {str(e)}")
+        except Exception as e:
+            return format_error(f"Unexpected error: {str(e)}")
+    
+    return cast(F, wrapper)
+
+# Persistent HTTP client
+async def get_client() -> httpx.AsyncClient:
+    """Get a persistent httpx client for Home Assistant API calls"""
+    global _client
+    if _client is None:
+        logger.debug("Creating new HTTP client")
+        _client = httpx.AsyncClient(timeout=10.0)
+    return _client
+
+async def cleanup_client() -> None:
+    """Close the HTTP client when shutting down"""
+    global _client
+    if _client:
+        logger.debug("Closing HTTP client")
+        await _client.aclose()
+        _client = None
+
+# Direct entity retrieval function
+async def get_all_entity_states() -> Dict[str, Dict[str, Any]]:
+    """Fetch all entity states from Home Assistant"""
+    client = await get_client()
+    response = await client.get(f"{HA_URL}/api/states", headers=get_ha_headers())
+    response.raise_for_status()
+    entities = response.json()
+    
+    # Create a mapping for easier access
+    return {entity["entity_id"]: entity for entity in entities}
+
+def filter_fields(data: Dict[str, Any], fields: List[str]) -> Dict[str, Any]:
+    """
+    Filter entity data to only include requested fields
+    
+    This function helps reduce token usage by returning only requested fields.
+    
+    Args:
+        data: The complete entity data dictionary
+        fields: List of fields to include in the result
+               - "state": Include the entity state
+               - "attributes": Include all attributes
+               - "attr.X": Include only attribute X (e.g. "attr.brightness")
+               - "context": Include context data
+               - "last_updated"/"last_changed": Include timestamp fields
+    
+    Returns:
+        A filtered dictionary with only the requested fields
+    """
+    if not fields:
+        return data
+        
+    result = {"entity_id": data["entity_id"]}
+    
+    for field in fields:
+        if field == "state":
+            result["state"] = data.get("state")
+        elif field == "attributes":
+            result["attributes"] = data.get("attributes", {})
+        elif field.startswith("attr.") and len(field) > 5:
+            attr_name = field[5:]
+            attributes = data.get("attributes", {})
+            if attr_name in attributes:
+                if "attributes" not in result:
+                    result["attributes"] = {}
+                result["attributes"][attr_name] = attributes[attr_name]
+        elif field == "context":
+            if "context" in data:
+                result["context"] = data["context"]
+        elif field in ["last_updated", "last_changed"]:
+            if field in data:
+                result[field] = data[field]
+    
+    return result
+
+# API Functions
+@handle_api_errors
+async def get_hass_version() -> str:
+    """Get the Home Assistant version from the API"""
+    client = await get_client()
+    response = await client.get(f"{HA_URL}/api/config", headers=get_ha_headers())
+    response.raise_for_status()
+    data = response.json()
+    return data.get("version", "unknown")
+
+@handle_api_errors
+async def get_entity_state(
+    entity_id: str,
+    fields: Optional[List[str]] = None,
+    lean: bool = False
+) -> Dict[str, Any]:
+    """
+    Get the state of a Home Assistant entity
+    
+    Args:
+        entity_id: The entity ID to get
+        fields: Optional list of specific fields to include in the response
+        lean: If True, returns a token-efficient version with minimal fields
+              (overridden by fields parameter if provided)
+    
+    Returns:
+        Entity state dictionary, optionally filtered to include only specified fields
+    """
+    # Fetch directly
+    client = await get_client()
+    response = await client.get(
+        f"{HA_URL}/api/states/{entity_id}", 
+        headers=get_ha_headers()
+    )
+    response.raise_for_status()
+    entity_data = response.json()
+    
+    # Apply field filtering if requested
+    if fields:
+        # User-specified fields take precedence
+        return filter_fields(entity_data, fields)
+    elif lean:
+        # Build domain-specific lean fields
+        lean_fields = DEFAULT_LEAN_FIELDS.copy()
+        
+        # Add domain-specific important attributes
+        domain = entity_id.split('.')[0]
+        if domain in DOMAIN_IMPORTANT_ATTRIBUTES:
+            for attr in DOMAIN_IMPORTANT_ATTRIBUTES[domain]:
+                lean_fields.append(f"attr.{attr}")
+        
+        return filter_fields(entity_data, lean_fields)
+    else:
+        # Return full entity data
+        return entity_data
+
+@handle_api_errors
+async def get_entities(
+    domain: Optional[str] = None, 
+    search_query: Optional[str] = None, 
+    limit: int = 100,
+    fields: Optional[List[str]] = None,
+    lean: bool = True
+) -> List[Dict[str, Any]]:
+    """
+    Get a list of all entities from Home Assistant with optional filtering and search
+    
+    Args:
+        domain: Optional domain to filter entities by (e.g., 'light', 'switch')
+        search_query: Optional case-insensitive search term to filter by entity_id, friendly_name or other attributes
+        limit: Maximum number of entities to return (default: 100)
+        fields: Optional list of specific fields to include in each entity
+        lean: If True (default), returns token-efficient versions with minimal fields
+    
+    Returns:
+        List of entity dictionaries, optionally filtered by domain and search terms,
+        and optionally limited to specific fields
+    """
+    # Get all entities directly
+    client = await get_client()
+    response = await client.get(f"{HA_URL}/api/states", headers=get_ha_headers())
+    response.raise_for_status()
+    entities = response.json()
+    
+    # Filter by domain if specified
+    if domain:
+        entities = [entity for entity in entities if entity["entity_id"].startswith(f"{domain}.")]
+    
+    # Search if query is provided
+    if search_query and search_query.strip():
+        search_term = search_query.lower().strip()
+        filtered_entities = []
+        
+        for entity in entities:
+            # Search in entity_id
+            if search_term in entity["entity_id"].lower():
+                filtered_entities.append(entity)
+                continue
+                
+            # Search in friendly_name
+            friendly_name = entity.get("attributes", {}).get("friendly_name", "").lower()
+            if friendly_name and search_term in friendly_name:
+                filtered_entities.append(entity)
+                continue
+                
+            # Search in other common attributes (state, area_id, etc.)
+            if search_term in entity.get("state", "").lower():
+                filtered_entities.append(entity)
+                continue
+                
+            # Search in other attributes
+            for attr_name, attr_value in entity.get("attributes", {}).items():
+                # Check if attribute value can be converted to string
+                if isinstance(attr_value, (str, int, float, bool)):
+                    if search_term in str(attr_value).lower():
+                        filtered_entities.append(entity)
+                        break
+        
+        entities = filtered_entities
+    
+    # Apply the limit
+    if limit > 0 and len(entities) > limit:
+        entities = entities[:limit]
+    
+    # Apply field filtering if requested
+    if fields:
+        # Use explicit field list when provided
+        return [filter_fields(entity, fields) for entity in entities]
+    elif lean:
+        # Apply domain-specific lean fields to each entity
+        result = []
+        for entity in entities:
+            # Get the entity's domain
+            entity_domain = entity["entity_id"].split('.')[0]
+            
+            # Start with basic lean fields
+            lean_fields = DEFAULT_LEAN_FIELDS.copy()
+            
+            # Add domain-specific important attributes
+            if entity_domain in DOMAIN_IMPORTANT_ATTRIBUTES:
+                for attr in DOMAIN_IMPORTANT_ATTRIBUTES[entity_domain]:
+                    lean_fields.append(f"attr.{attr}")
+            
+            # Filter and add to result
+            result.append(filter_fields(entity, lean_fields))
+        
+        return result
+    else:
+        # Return full entities
+        return entities
+
+@handle_api_errors
+async def call_service(domain: str, service: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Call a Home Assistant service"""
+    if data is None:
+        data = {}
+    
+    client = await get_client()
+    response = await client.post(
+        f"{HA_URL}/api/services/{domain}/{service}", 
+        headers=get_ha_headers(),
+        json=data
+    )
+    response.raise_for_status()
+    
+    # Invalidate cache after service calls as they might change entity states
+    global _entities_timestamp
+    _entities_timestamp = 0
+    
+    return response.json()
+
+@handle_api_errors
+async def summarize_domain(domain: str, example_limit: int = 3) -> Dict[str, Any]:
+    """
+    Generate a summary of entities in a domain
+    
+    Args:
+        domain: The domain to summarize (e.g., 'light', 'switch')
+        example_limit: Maximum number of examples to include for each state
+        
+    Returns:
+        Dictionary with summary information
+    """
+    entities = await get_entities(domain=domain)
+    
+    # Check if we got an error response
+    if isinstance(entities, dict) and "error" in entities:
+        return entities  # Just pass through the error
+    
+    try:
+        # Initialize summary data
+        total_count = len(entities)
+        state_counts = {}
+        state_examples = {}
+        attributes_summary = {}
+        
+        # Process entities to build the summary
+        for entity in entities:
+            state = entity.get("state", "unknown")
+            
+            # Count states
+            if state not in state_counts:
+                state_counts[state] = 0
+                state_examples[state] = []
+            state_counts[state] += 1
+            
+            # Add examples (up to the limit)
+            if len(state_examples[state]) < example_limit:
+                example = {
+                    "entity_id": entity["entity_id"],
+                    "friendly_name": entity.get("attributes", {}).get("friendly_name", entity["entity_id"])
+                }
+                state_examples[state].append(example)
+            
+            # Collect attribute keys for summary
+            for attr_key in entity.get("attributes", {}):
+                if attr_key not in attributes_summary:
+                    attributes_summary[attr_key] = 0
+                attributes_summary[attr_key] += 1
+        
+        # Create the summary
+        summary = {
+            "domain": domain,
+            "total_count": total_count,
+            "state_distribution": state_counts,
+            "examples": state_examples,
+            "common_attributes": sorted(
+                [(k, v) for k, v in attributes_summary.items()], 
+                key=lambda x: x[1], 
+                reverse=True
+            )[:10]  # Top 10 most common attributes
+        }
+        
+        return summary
+    except Exception as e:
+        return {"error": f"Error generating domain summary: {str(e)}"}
+
+@handle_api_errors
+async def get_automations() -> List[Dict[str, Any]]:
+    """Get a list of all automations from Home Assistant"""
+    # Reuse the get_entities function with domain filtering
+    automation_entities = await get_entities(domain="automation")
+    
+    # Check if we got an error response
+    if isinstance(automation_entities, dict) and "error" in automation_entities:
+        return automation_entities  # Just pass through the error
+    
+    # Process automation entities
+    result = []
+    try:
+        for entity in automation_entities:
+            # Extract relevant information
+            automation_info = {
+                "id": entity["entity_id"].split(".")[1],
+                "entity_id": entity["entity_id"],
+                "state": entity["state"],
+                "alias": entity["attributes"].get("friendly_name", entity["entity_id"]),
+            }
+            
+            # Add any additional attributes that might be useful
+            if "last_triggered" in entity["attributes"]:
+                automation_info["last_triggered"] = entity["attributes"]["last_triggered"]
+            
+            result.append(automation_info)
+    except (TypeError, KeyError) as e:
+        # Handle errors in processing the entities
+        return {"error": f"Error processing automation entities: {str(e)}"}
+        
+    return result
+
+@handle_api_errors
+async def reload_automations() -> Dict[str, Any]:
+    """Reload all automations in Home Assistant"""
+    return await call_service("automation", "reload", {})
+
+@handle_api_errors
+async def restart_home_assistant() -> Dict[str, Any]:
+    """Restart Home Assistant"""
+    return await call_service("homeassistant", "restart", {})
+
+@handle_api_errors
+async def get_hass_error_log() -> Dict[str, Any]:
+    """
+    Get the Home Assistant error log for troubleshooting
+    
+    Returns:
+        A dictionary containing:
+        - log_text: The full error log text
+        - error_count: Number of ERROR entries found
+        - warning_count: Number of WARNING entries found
+        - integration_mentions: Map of integration names to mention counts
+        - error: Error message if retrieval failed
+    """
+    try:
+        # Call the Home Assistant API error_log endpoint
+        url = f"{HA_URL}/api/error_log"
+        headers = get_ha_headers()
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=headers, timeout=30)
+            
+            if response.status_code == 200:
+                log_text = response.text
+                
+                # Count errors and warnings
+                error_count = log_text.count("ERROR")
+                warning_count = log_text.count("WARNING")
+                
+                # Extract integration mentions
+                import re
+                integration_mentions = {}
+                
+                # Look for patterns like [mqtt], [zwave], etc.
+                for match in re.finditer(r'\[([a-zA-Z0-9_]+)\]', log_text):
+                    integration = match.group(1).lower()
+                    if integration not in integration_mentions:
+                        integration_mentions[integration] = 0
+                    integration_mentions[integration] += 1
+                
+                return {
+                    "log_text": log_text,
+                    "error_count": error_count,
+                    "warning_count": warning_count,
+                    "integration_mentions": integration_mentions
+                }
+            else:
+                return {
+                    "error": f"Error retrieving error log: {response.status_code} {response.reason_phrase}",
+                    "details": response.text,
+                    "log_text": "",
+                    "error_count": 0,
+                    "warning_count": 0,
+                    "integration_mentions": {}
+                }
+    except Exception as e:
+        logger.error(f"Error retrieving Home Assistant error log: {str(e)}")
+        return {
+            "error": f"Error retrieving error log: {str(e)}",
+            "log_text": "",
+            "error_count": 0,
+            "warning_count": 0,
+            "integration_mentions": {}
+        }
+
+@handle_api_errors
+async def get_system_overview() -> Dict[str, Any]:
+    """
+    Get a comprehensive overview of the entire Home Assistant system
+    
+    Returns:
+        A dictionary containing:
+        - total_entities: Total count of all entities
+        - domains: Dictionary of domains with their entity counts and state distributions
+        - domain_samples: Representative sample entities for each domain (2-3 per domain)
+        - domain_attributes: Common attributes for each domain
+        - area_distribution: Entities grouped by area (if available)
+    """
+    try:
+        # Get ALL entities with minimal fields for efficiency
+        # We retrieve all entities since API calls don't consume tokens, only responses do
+        client = await get_client()
+        response = await client.get(f"{HA_URL}/api/states", headers=get_ha_headers())
+        response.raise_for_status()
+        all_entities_raw = response.json()
+        
+        # Apply lean formatting to reduce token usage in the response
+        all_entities = []
+        for entity in all_entities_raw:
+            domain = entity["entity_id"].split(".")[0]
+            
+            # Start with basic lean fields
+            lean_fields = ["entity_id", "state", "attr.friendly_name"]
+            
+            # Add domain-specific important attributes
+            if domain in DOMAIN_IMPORTANT_ATTRIBUTES:
+                for attr in DOMAIN_IMPORTANT_ATTRIBUTES[domain]:
+                    lean_fields.append(f"attr.{attr}")
+            
+            # Filter and add to result
+            all_entities.append(filter_fields(entity, lean_fields))
+        
+        # Initialize overview structure
+        overview = {
+            "total_entities": len(all_entities),
+            "domains": {},
+            "domain_samples": {},
+            "domain_attributes": {},
+            "area_distribution": {}
+        }
+        
+        # Group entities by domain
+        domain_entities = {}
+        for entity in all_entities:
+            domain = entity["entity_id"].split(".")[0]
+            if domain not in domain_entities:
+                domain_entities[domain] = []
+            domain_entities[domain].append(entity)
+        
+        # Process each domain
+        for domain, entities in domain_entities.items():
+            # Count entities in this domain
+            count = len(entities)
+            
+            # Collect state distribution
+            state_distribution = {}
+            for entity in entities:
+                state = entity.get("state", "unknown")
+                if state not in state_distribution:
+                    state_distribution[state] = 0
+                state_distribution[state] += 1
+            
+            # Store domain information
+            overview["domains"][domain] = {
+                "count": count,
+                "states": state_distribution
+            }
+            
+            # Select representative samples (2-3 per domain)
+            sample_limit = min(3, count)
+            samples = []
+            for i in range(sample_limit):
+                entity = entities[i]
+                samples.append({
+                    "entity_id": entity["entity_id"],
+                    "state": entity.get("state", "unknown"),
+                    "friendly_name": entity.get("attributes", {}).get("friendly_name", entity["entity_id"])
+                })
+            overview["domain_samples"][domain] = samples
+            
+            # Collect common attributes for this domain
+            attribute_counts = {}
+            for entity in entities:
+                for attr in entity.get("attributes", {}):
+                    if attr not in attribute_counts:
+                        attribute_counts[attr] = 0
+                    attribute_counts[attr] += 1
+            
+            # Get top 5 most common attributes for this domain
+            common_attributes = sorted(attribute_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+            overview["domain_attributes"][domain] = [attr for attr, count in common_attributes]
+            
+            # Group by area if available
+            for entity in entities:
+                area_id = entity.get("attributes", {}).get("area_id", "Unknown")
+                area_name = entity.get("attributes", {}).get("area_name", area_id)
+                
+                if area_name not in overview["area_distribution"]:
+                    overview["area_distribution"][area_name] = {}
+                
+                if domain not in overview["area_distribution"][area_name]:
+                    overview["area_distribution"][area_name][domain] = 0
+                    
+                overview["area_distribution"][area_name][domain] += 1
+        
+        # Add summary information
+        overview["domain_count"] = len(domain_entities)
+        overview["most_common_domains"] = sorted(
+            [(domain, len(entities)) for domain, entities in domain_entities.items()],
+            key=lambda x: x[1],
+            reverse=True
+        )[:5]
+        
+        return overview
+    except Exception as e:
+        logger.error(f"Error generating system overview: {str(e)}")
+        return {"error": f"Error generating system overview: {str(e)}"}
+</file>
+
+<file path="app/server.py">
+import functools
+import logging
+import json
+import httpx
+from typing import List, Dict, Any, Optional, Callable, Awaitable, TypeVar, cast
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+from app.hass import (
+    get_hass_version, get_entity_state, call_service, get_entities,
+    get_automations, restart_home_assistant, 
+    cleanup_client, filter_fields, summarize_domain, get_system_overview,
+    get_hass_error_log
+)
+
+# Type variable for generic functions
+T = TypeVar('T')
+
+# Create an MCP server
+from mcp.server.fastmcp import FastMCP, Context, Image
+from mcp.server.stdio import stdio_server
+import mcp.types as types
+mcp = FastMCP("Hass-MCP", capabilities={
+    "resources": {},
+    "tools": {},
+    "prompts": {}
+})
+
+def async_handler(command_type: str):
+    """
+    Simple decorator that logs the command
+    
+    Args:
+        command_type: The type of command (for logging)
+    """
+    def decorator(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
+        @functools.wraps(func)
+        async def wrapper(*args: Any, **kwargs: Any) -> T:
+            logger.info(f"Executing command: {command_type}")
+            return await func(*args, **kwargs)
+        return cast(Callable[..., Awaitable[T]], wrapper)
+    return decorator
+
+@mcp.tool()
+@async_handler("get_version")
+async def get_version() -> str:
+    """
+    Get the Home Assistant version
+    
+    Returns:
+        A string with the Home Assistant version (e.g., "2025.3.0")
+    """
+    logger.info("Getting Home Assistant version")
+    return await get_hass_version()
+
+@mcp.tool()
+@async_handler("get_entity")
+async def get_entity(entity_id: str, fields: Optional[List[str]] = None, detailed: bool = False) -> dict:
+    """
+    Get the state of a Home Assistant entity with optional field filtering
+    
+    Args:
+        entity_id: The entity ID to get (e.g. 'light.living_room')
+        fields: Optional list of fields to include (e.g. ['state', 'attr.brightness'])
+        detailed: If True, returns all entity fields without filtering
+                
+    Examples:
+        entity_id="light.living_room" - basic state check
+        entity_id="light.living_room", fields=["state", "attr.brightness"] - specific fields
+        entity_id="light.living_room", detailed=True - all details
+    """
+    logger.info(f"Getting entity state: {entity_id}")
+    if detailed:
+        # Return all fields
+        return await get_entity_state(entity_id, lean=False)
+    elif fields:
+        # Return only the specified fields
+        return await get_entity_state(entity_id, fields=fields)
+    else:
+        # Return lean format with essential fields
+        return await get_entity_state(entity_id, lean=True)
+
+@mcp.tool()
+@async_handler("entity_action")
+async def entity_action(entity_id: str, action: str, **params) -> dict:
+    """
+    Perform an action on a Home Assistant entity (on, off, toggle)
+    
+    Args:
+        entity_id: The entity ID to control (e.g. 'light.living_room')
+        action: The action to perform ('on', 'off', 'toggle')
+        **params: Additional parameters for the service call
+    
+    Returns:
+        The response from Home Assistant
+    
+    Examples:
+        entity_id="light.living_room", action="on", brightness=255
+        entity_id="switch.garden_lights", action="off"
+        entity_id="climate.living_room", action="on", temperature=22.5
+    
+    Domain-Specific Parameters:
+        - Lights: brightness (0-255), color_temp, rgb_color, transition, effect
+        - Covers: position (0-100), tilt_position
+        - Climate: temperature, target_temp_high, target_temp_low, hvac_mode
+        - Media players: source, volume_level (0-1)
+    """
+    if action not in ["on", "off", "toggle"]:
+        return {"error": f"Invalid action: {action}. Valid actions are 'on', 'off', 'toggle'"}
+    
+    # Map action to service name
+    service = action if action == "toggle" else f"turn_{action}"
+    
+    # Extract the domain from the entity_id
+    domain = entity_id.split(".")[0]
+    
+    # Prepare service data
+    data = {"entity_id": entity_id, **params}
+    
+    logger.info(f"Performing action '{action}' on entity: {entity_id} with params: {params}")
+    return await call_service(domain, service, data)
+
+@mcp.resource("hass://entities/{entity_id}")
+@async_handler("get_entity_resource")
+async def get_entity_resource(entity_id: str) -> str:
+    """
+    Get the state of a Home Assistant entity as a resource
+    
+    This endpoint provides a standard view with common entity information.
+    For comprehensive attribute details, use the /detailed endpoint.
+    
+    Args:
+        entity_id: The entity ID to get information for
+    """
+    logger.info(f"Getting entity resource: {entity_id}")
+    
+    # Get the entity state with caching (using lean format for token efficiency)
+    state = await get_entity_state(entity_id, use_cache=True, lean=True)
+    
+    # Check if there was an error
+    if "error" in state:
+        return f"# Entity: {entity_id}\n\nError retrieving entity: {state['error']}"
+    
+    # Format the entity as markdown
+    result = f"# Entity: {entity_id}\n\n"
+    
+    # Get friendly name if available
+    friendly_name = state.get("attributes", {}).get("friendly_name")
+    if friendly_name and friendly_name != entity_id:
+        result += f"**Name**: {friendly_name}\n\n"
+    
+    # Add state
+    result += f"**State**: {state.get('state')}\n\n"
+    
+    # Add domain info
+    domain = entity_id.split(".")[0]
+    result += f"**Domain**: {domain}\n\n"
+    
+    # Add key attributes based on domain type
+    attributes = state.get("attributes", {})
+    
+    # Add a curated list of important attributes
+    important_attrs = []
+    
+    # Common attributes across many domains
+    common_attrs = ["device_class", "unit_of_measurement", "friendly_name"]
+    
+    # Domain-specific important attributes
+    if domain == "light":
+        important_attrs = ["brightness", "color_temp", "rgb_color", "supported_features", "supported_color_modes"] 
+    elif domain == "sensor":
+        important_attrs = ["unit_of_measurement", "device_class", "state_class"]
+    elif domain == "climate":
+        important_attrs = ["hvac_mode", "hvac_action", "temperature", "current_temperature", "target_temp_*"]
+    elif domain == "media_player":
+        important_attrs = ["media_title", "media_artist", "source", "volume_level", "media_content_type"]
+    elif domain == "switch" or domain == "binary_sensor":
+        important_attrs = ["device_class", "is_on"]
+    
+    # Combine with common attributes
+    important_attrs.extend(common_attrs)
+    
+    # Deduplicate the list while preserving order
+    important_attrs = list(dict.fromkeys(important_attrs))
+    
+    # Create and add the important attributes section
+    result += "## Key Attributes\n\n"
+    
+    # Display only the important attributes that exist
+    displayed_attrs = 0
+    for attr_name in important_attrs:
+        # Handle wildcard attributes (e.g., target_temp_*)
+        if attr_name.endswith("*"):
+            prefix = attr_name[:-1]
+            matching_attrs = [name for name in attributes if name.startswith(prefix)]
+            for name in matching_attrs:
+                result += f"- **{name}**: {attributes[name]}\n"
+                displayed_attrs += 1
+        # Regular attribute match
+        elif attr_name in attributes:
+            attr_value = attributes[attr_name]
+            if isinstance(attr_value, (list, dict)) and len(str(attr_value)) > 100:
+                result += f"- **{attr_name}**: *[Complex data]*\n"
+            else:
+                result += f"- **{attr_name}**: {attr_value}\n"
+            displayed_attrs += 1
+    
+    # If no important attributes were found, show a message
+    if displayed_attrs == 0:
+        result += "No key attributes found for this entity type.\n\n"
+    
+    # Add attribute count and link to detailed view
+    total_attr_count = len(attributes)
+    if total_attr_count > displayed_attrs:
+        hidden_count = total_attr_count - displayed_attrs
+        result += f"\n**Note**: Showing {displayed_attrs} of {total_attr_count} total attributes. "
+        result += f"{hidden_count} additional attributes are available in the [detailed view](/api/resource/hass://entities/{entity_id}/detailed).\n\n"
+    
+    # Add last updated time if available
+    if "last_updated" in state:
+        result += f"**Last Updated**: {state['last_updated']}\n"
+    
+    return result
+
+@mcp.tool()
+@async_handler("list_entities")
+async def list_entities(
+    domain: Optional[str] = None, 
+    search_query: Optional[str] = None, 
+    limit: int = 100,
+    fields: Optional[List[str]] = None,
+    detailed: bool = False
+) -> List[Dict[str, Any]]:
+    """
+    Get a list of Home Assistant entities with optional filtering
+    
+    Args:
+        domain: Optional domain to filter by (e.g., 'light', 'switch', 'sensor')
+        search_query: Optional search term to filter entities by name, id, or attributes
+                     (Note: Does not support wildcards. To get all entities, leave this empty)
+        limit: Maximum number of entities to return (default: 100)
+        fields: Optional list of specific fields to include in each entity
+        detailed: If True, returns all entity fields without filtering
+    
+    Returns:
+        A list of entity dictionaries with lean formatting by default
+    
+    Examples:
+        domain="light" - get all lights
+        search_query="kitchen", limit=20 - search entities
+        domain="sensor", detailed=True - full sensor details
+    
+    Best Practices:
+        - Use lean format (default) for most operations
+        - Prefer domain filtering over no filtering
+        - For domain overviews, use domain_summary_tool instead of list_entities
+        - Only request detailed=True when necessary for full attribute inspection
+        - To get all entity types/domains, use list_entities without a domain filter, 
+          then extract domains from entity_ids
+    """
+    log_message = "Getting entities"
+    if domain:
+        log_message += f" for domain: {domain}"
+    if search_query:
+        log_message += f" matching: '{search_query}'"
+    if limit != 100:
+        log_message += f" (limit: {limit})"
+    if detailed:
+        log_message += " (detailed format)"
+    elif fields:
+        log_message += f" (custom fields: {fields})"
+    else:
+        log_message += " (lean format)"
+    
+    logger.info(log_message)
+    
+    # Handle special case where search_query is a wildcard/asterisk - just ignore it
+    if search_query == "*":
+        search_query = None
+        logger.info("Converting '*' search query to None (retrieving all entities)")
+    
+    # Use the updated get_entities function with field filtering
+    return await get_entities(
+        domain=domain, 
+        search_query=search_query, 
+        limit=limit,
+        fields=fields,
+        lean=not detailed  # Use lean format unless detailed is requested
+    )
+
+@mcp.resource("hass://entities")
+@async_handler("get_all_entities_resource")
+async def get_all_entities_resource() -> str:
+    """
+    Get a list of all Home Assistant entities as a resource
+    
+    This endpoint returns a complete list of all entities in Home Assistant, 
+    organized by domain. For token efficiency with large installations,
+    consider using domain-specific endpoints or the domain summary instead.
+    
+    Returns:
+        A markdown formatted string listing all entities grouped by domain
+        
+    Examples:
+        ```
+        # Get all entities
+        entities = mcp.get_resource("hass://entities")
+        ```
+        
+    Best Practices:
+        - WARNING: This endpoint can return large amounts of data with many entities
+        - Prefer domain-filtered endpoints: hass://entities/domain/{domain}
+        - For overview information, use domain summaries instead of full entity lists
+        - Consider starting with a search if looking for specific entities
+    """
+    logger.info("Getting all entities as a resource")
+    entities = await get_entities(lean=True)
+    
+    # Check if there was an error
+    if isinstance(entities, dict) and "error" in entities:
+        return f"Error retrieving entities: {entities['error']}"
+    if len(entities) == 1 and isinstance(entities[0], dict) and "error" in entities[0]:
+        return f"Error retrieving entities: {entities[0]['error']}"
+    
+    # Format the entities as a string
+    result = "# Home Assistant Entities\n\n"
+    result += f"Total entities: {len(entities)}\n\n"
+    result += "⚠️ **Note**: For better performance and token efficiency, consider using:\n"
+    result += "- Domain filtering: `hass://entities/domain/{domain}`\n"
+    result += "- Domain summaries: `hass://entities/domain/{domain}/summary`\n"
+    result += "- Entity search: `hass://search/{query}`\n\n"
+    
+    # Group entities by domain for better organization
+    domains = {}
+    for entity in entities:
+        domain = entity["entity_id"].split(".")[0]
+        if domain not in domains:
+            domains[domain] = []
+        domains[domain].append(entity)
+    
+    # Build the string with entities grouped by domain
+    for domain in sorted(domains.keys()):
+        domain_count = len(domains[domain])
+        result += f"## {domain.capitalize()} ({domain_count})\n\n"
+        for entity in sorted(domains[domain], key=lambda e: e["entity_id"]):
+            # Get a friendly name if available
+            friendly_name = entity.get("attributes", {}).get("friendly_name", "")
+            result += f"- **{entity['entity_id']}**: {entity['state']}"
+            if friendly_name and friendly_name != entity["entity_id"]:
+                result += f" ({friendly_name})"
+            result += "\n"
+        result += "\n"
+    
+    return result
+
+@mcp.tool()
+@async_handler("search_entities_tool")
+async def search_entities_tool(query: str, limit: int = 20) -> Dict[str, Any]:
+    """
+    Search for entities matching a query string
+    
+    Args:
+        query: The search query to match against entity IDs, names, and attributes.
+              (Note: Does not support wildcards. To get all entities, leave this blank or use list_entities tool)
+        limit: Maximum number of results to return (default: 20)
+    
+    Returns:
+        A dictionary containing search results and metadata:
+        - count: Total number of matching entities found
+        - results: List of matching entities with essential information
+        - domains: Map of domains with counts (e.g. {"light": 3, "sensor": 2})
+        
+    Examples:
+        query="temperature" - find temperature entities
+        query="living room", limit=10 - find living room entities
+        query="", limit=500 - list all entity types
+        
+    """
+    logger.info(f"Searching for entities matching: '{query}' with limit: {limit}")
+    
+    # Special case - treat "*" as empty query to just return entities without filtering
+    if query == "*":
+        query = ""
+        logger.info("Converting '*' to empty query (retrieving all entities up to limit)")
+    
+    # Handle empty query as a special case to just return entities up to the limit
+    if not query or not query.strip():
+        logger.info(f"Empty query - retrieving up to {limit} entities without filtering")
+        entities = await get_entities(limit=limit, lean=True)
+        
+        # Check if there was an error
+        if isinstance(entities, dict) and "error" in entities:
+            return {"error": entities["error"], "count": 0, "results": [], "domains": {}}
+        
+        # No query, but we'll return a structured result anyway
+        domains_count = {}
+        simplified_entities = []
+        
+        for entity in entities:
+            domain = entity["entity_id"].split(".")[0]
+            
+            # Count domains
+            if domain not in domains_count:
+                domains_count[domain] = 0
+            domains_count[domain] += 1
+            
+            # Create simplified entity representation
+            simplified_entity = {
+                "entity_id": entity["entity_id"],
+                "state": entity["state"],
+                "domain": domain,
+                "friendly_name": entity.get("attributes", {}).get("friendly_name", entity["entity_id"])
+            }
+            
+            # Add key attributes based on domain
+            attributes = entity.get("attributes", {})
+            
+            # Include domain-specific important attributes
+            if domain == "light" and "brightness" in attributes:
+                simplified_entity["brightness"] = attributes["brightness"]
+            elif domain == "sensor" and "unit_of_measurement" in attributes:
+                simplified_entity["unit"] = attributes["unit_of_measurement"]
+            elif domain == "climate" and "temperature" in attributes:
+                simplified_entity["temperature"] = attributes["temperature"]
+            elif domain == "media_player" and "media_title" in attributes:
+                simplified_entity["media_title"] = attributes["media_title"]
+            
+            simplified_entities.append(simplified_entity)
+        
+        # Return structured response for empty query
+        return {
+            "count": len(simplified_entities),
+            "results": simplified_entities,
+            "domains": domains_count,
+            "query": "all entities (no filtering)"
+        }
+    
+    # Normal search with non-empty query
+    entities = await get_entities(search_query=query, limit=limit, lean=True)
+    
+    # Check if there was an error
+    if isinstance(entities, dict) and "error" in entities:
+        return {"error": entities["error"], "count": 0, "results": [], "domains": {}}
+    
+    # Prepare the results
+    domains_count = {}
+    simplified_entities = []
+    
+    for entity in entities:
+        domain = entity["entity_id"].split(".")[0]
+        
+        # Count domains
+        if domain not in domains_count:
+            domains_count[domain] = 0
+        domains_count[domain] += 1
+        
+        # Create simplified entity representation
+        simplified_entity = {
+            "entity_id": entity["entity_id"],
+            "state": entity["state"],
+            "domain": domain,
+            "friendly_name": entity.get("attributes", {}).get("friendly_name", entity["entity_id"])
+        }
+        
+        # Add key attributes based on domain
+        attributes = entity.get("attributes", {})
+        
+        # Include domain-specific important attributes
+        if domain == "light" and "brightness" in attributes:
+            simplified_entity["brightness"] = attributes["brightness"]
+        elif domain == "sensor" and "unit_of_measurement" in attributes:
+            simplified_entity["unit"] = attributes["unit_of_measurement"]
+        elif domain == "climate" and "temperature" in attributes:
+            simplified_entity["temperature"] = attributes["temperature"]
+        elif domain == "media_player" and "media_title" in attributes:
+            simplified_entity["media_title"] = attributes["media_title"]
+        
+        simplified_entities.append(simplified_entity)
+    
+    # Return structured response
+    return {
+        "count": len(simplified_entities),
+        "results": simplified_entities,
+        "domains": domains_count,
+        "query": query
+    }
+    
+@mcp.resource("hass://search/{query}/{limit}")
+@async_handler("search_entities_resource_with_limit")
+async def search_entities_resource_with_limit(query: str, limit: str) -> str:
+    """
+    Search for entities matching a query string with a specified result limit
+    
+    This endpoint extends the basic search functionality by allowing you to specify
+    a custom limit on the number of results returned. It's useful for both broader
+    searches (larger limit) and more focused searches (smaller limit).
+    
+    Args:
+        query: The search query to match against entity IDs, names, and attributes
+        limit: Maximum number of entities to return (as a string, will be converted to int)
+    
+    Returns:
+        A markdown formatted string with search results and a JSON summary
+        
+    Examples:
+        ```
+        # Search with a larger limit (up to 50 results)
+        results = mcp.get_resource("hass://search/sensor/50")
+        
+        # Search with a smaller limit for focused results
+        results = mcp.get_resource("hass://search/kitchen/5")
+        ```
+        
+    Best Practices:
+        - Use smaller limits (5-10) for focused searches where you need just a few matches
+        - Use larger limits (30-50) for broader searches when you need more comprehensive results
+        - Balance larger limits against token usage - more results means more tokens
+        - Consider domain-specific searches for better precision: "light kitchen" instead of just "kitchen"
+    """
+    try:
+        limit_int = int(limit)
+        if limit_int <= 0:
+            limit_int = 20
+    except ValueError:
+        limit_int = 20
+        
+    logger.info(f"Searching for entities matching: '{query}' with custom limit: {limit_int}")
+    
+    if not query or not query.strip():
+        return "# Entity Search\n\nError: No search query provided"
+    
+    entities = await get_entities(search_query=query, limit=limit_int, lean=True)
+    
+    # Check if there was an error
+    if isinstance(entities, dict) and "error" in entities:
+        return f"# Entity Search\n\nError retrieving entities: {entities['error']}"
+    
+    # Format the search results
+    result = f"# Entity Search Results for '{query}' (Limit: {limit_int})\n\n"
+    
+    if not entities:
+        result += "No entities found matching your search query.\n"
+        return result
+    
+    result += f"Found {len(entities)} matching entities:\n\n"
+    
+    # Group entities by domain for better organization
+    domains = {}
+    for entity in entities:
+        domain = entity["entity_id"].split(".")[0]
+        if domain not in domains:
+            domains[domain] = []
+        domains[domain].append(entity)
+    
+    # Build the string with entities grouped by domain
+    for domain in sorted(domains.keys()):
+        result += f"## {domain.capitalize()}\n\n"
+        for entity in sorted(domains[domain], key=lambda e: e["entity_id"]):
+            # Get a friendly name if available
+            friendly_name = entity.get("attributes", {}).get("friendly_name", entity["entity_id"])
+            result += f"- **{entity['entity_id']}**: {entity['state']}"
+            if friendly_name != entity["entity_id"]:
+                result += f" ({friendly_name})"
+            result += "\n"
+        result += "\n"
+    
+    # Add a more structured summary section for easy LLM processing
+    result += "## Summary in JSON format\n\n"
+    result += "```json\n"
+    
+    # Create a simplified JSON representation with only essential fields
+    simplified_entities = []
+    for entity in entities:
+        simplified_entity = {
+            "entity_id": entity["entity_id"],
+            "state": entity["state"],
+            "domain": entity["entity_id"].split(".")[0],
+            "friendly_name": entity.get("attributes", {}).get("friendly_name", entity["entity_id"])
+        }
+        
+        # Add key attributes based on domain type if they exist
+        domain = entity["entity_id"].split(".")[0]
+        attributes = entity.get("attributes", {})
+        
+        # Include domain-specific important attributes
+        if domain == "light" and "brightness" in attributes:
+            simplified_entity["brightness"] = attributes["brightness"]
+        elif domain == "sensor" and "unit_of_measurement" in attributes:
+            simplified_entity["unit"] = attributes["unit_of_measurement"]
+        elif domain == "climate" and "temperature" in attributes:
+            simplified_entity["temperature"] = attributes["temperature"]
+        elif domain == "media_player" and "media_title" in attributes:
+            simplified_entity["media_title"] = attributes["media_title"]
+        
+        simplified_entities.append(simplified_entity)
+    
+    result += json.dumps(simplified_entities, indent=2)
+    result += "\n```\n"
+    
+    return result
+
+# The domain_summary_tool is already implemented, no need to duplicate it
+
+@mcp.tool()
+@async_handler("domain_summary")
+async def domain_summary_tool(domain: str, example_limit: int = 3) -> Dict[str, Any]:
+    """
+    Get a summary of entities in a specific domain
+    
+    Args:
+        domain: The domain to summarize (e.g., 'light', 'switch', 'sensor')
+        example_limit: Maximum number of examples to include for each state
+    
+    Returns:
+        A dictionary containing:
+        - total_count: Number of entities in the domain
+        - state_distribution: Count of entities in each state
+        - examples: Sample entities for each state
+        - common_attributes: Most frequently occurring attributes
+        
+    Examples:
+        domain="light" - get light summary
+        domain="climate", example_limit=5 - climate summary with more examples
+    Best Practices:
+        - Use this before retrieving all entities in a domain to understand what's available    """
+    logger.info(f"Getting domain summary for: {domain}")
+    return await summarize_domain(domain, example_limit)
+
+@mcp.tool()
+@async_handler("system_overview")
+async def system_overview() -> Dict[str, Any]:
+    """
+    Get a comprehensive overview of the entire Home Assistant system
+    
+    Returns:
+        A dictionary containing:
+        - total_entities: Total count of all entities
+        - domains: Dictionary of domains with their entity counts and state distributions
+        - domain_samples: Representative sample entities for each domain (2-3 per domain)
+        - domain_attributes: Common attributes for each domain
+        - area_distribution: Entities grouped by area (if available)
+        
+    Examples:
+        Returns domain counts, sample entities, and common attributes
+    Best Practices:
+        - Use this as the first call when exploring an unfamiliar Home Assistant instance
+        - Perfect for building context about the structure of the smart home
+        - After getting an overview, use domain_summary_tool to dig deeper into specific domains
+    """
+    logger.info("Generating complete system overview")
+    return await get_system_overview()
+
+@mcp.resource("hass://entities/{entity_id}/detailed")
+@async_handler("get_entity_resource_detailed")
+async def get_entity_resource_detailed(entity_id: str) -> str:
+    """
+    Get detailed information about a Home Assistant entity as a resource
+    
+    Use this detailed view selectively when you need to:
+    - Understand all available attributes of an entity
+    - Debug entity behavior or capabilities
+    - See comprehensive state information
+    
+    For routine operations where you only need basic state information,
+    prefer the standard entity endpoint or specify fields in the get_entity tool.
+    
+    Args:
+        entity_id: The entity ID to get information for
+    """
+    logger.info(f"Getting detailed entity resource: {entity_id}")
+    
+    # Get all fields, no filtering (detailed view explicitly requests all data)
+    state = await get_entity_state(entity_id, use_cache=True, lean=False)
+    
+    # Check if there was an error
+    if "error" in state:
+        return f"# Entity: {entity_id}\n\nError retrieving entity: {state['error']}"
+    
+    # Format the entity as markdown
+    result = f"# Entity: {entity_id} (Detailed View)\n\n"
+    
+    # Get friendly name if available
+    friendly_name = state.get("attributes", {}).get("friendly_name")
+    if friendly_name and friendly_name != entity_id:
+        result += f"**Name**: {friendly_name}\n\n"
+    
+    # Add state
+    result += f"**State**: {state.get('state')}\n\n"
+    
+    # Add domain and entity type information
+    domain = entity_id.split(".")[0]
+    result += f"**Domain**: {domain}\n\n"
+    
+    # Add usage guidance
+    result += "## Usage Note\n"
+    result += "This is the detailed view showing all entity attributes. For token-efficient interactions, "
+    result += "consider using the standard entity endpoint or the get_entity tool with field filtering.\n\n"
+    
+    # Add all attributes with full details
+    attributes = state.get("attributes", {})
+    if attributes:
+        result += "## Attributes\n\n"
+        
+        # Sort attributes for better organization
+        sorted_attrs = sorted(attributes.items())
+        
+        # Format each attribute with complete information
+        for attr_name, attr_value in sorted_attrs:
+            # Format the attribute value
+            if isinstance(attr_value, (list, dict)):
+                attr_str = json.dumps(attr_value, indent=2)
+                result += f"- **{attr_name}**:\n```json\n{attr_str}\n```\n"
+            else:
+                result += f"- **{attr_name}**: {attr_value}\n"
+    
+    # Add context data section
+    result += "\n## Context Data\n\n"
+    
+    # Add last updated time if available
+    if "last_updated" in state:
+        result += f"**Last Updated**: {state['last_updated']}\n"
+    
+    # Add last changed time if available
+    if "last_changed" in state:
+        result += f"**Last Changed**: {state['last_changed']}\n"
+    
+    # Add entity ID and context information
+    if "context" in state:
+        context = state["context"]
+        result += f"**Context ID**: {context.get('id', 'N/A')}\n"
+        if "parent_id" in context:
+            result += f"**Parent Context**: {context['parent_id']}\n"
+        if "user_id" in context:
+            result += f"**User ID**: {context['user_id']}\n"
+    
+    # Add related entities suggestions
+    related_domains = []
+    if domain == "light":
+        related_domains = ["switch", "scene", "automation"]
+    elif domain == "sensor":
+        related_domains = ["binary_sensor", "input_number", "utility_meter"]
+    elif domain == "climate":
+        related_domains = ["sensor", "switch", "fan"]
+    elif domain == "media_player":
+        related_domains = ["remote", "switch", "sensor"]
+    
+    if related_domains:
+        result += "\n## Related Entity Types\n\n"
+        result += "You may want to check entities in these related domains:\n"
+        for related in related_domains:
+            result += f"- {related}\n"
+    
+    return result
+
+@mcp.resource("hass://entities/domain/{domain}")
+@async_handler("list_states_by_domain_resource")
+async def list_states_by_domain_resource(domain: str) -> str:
+    """
+    Get a list of entities for a specific domain as a resource
+    
+    This endpoint provides all entities of a specific type (domain). It's much more
+    token-efficient than retrieving all entities when you only need entities of a 
+    specific type.
+    
+    Args:
+        domain: The domain to filter by (e.g., 'light', 'switch', 'sensor')
+    
+    Returns:
+        A markdown formatted string with all entities in the specified domain
+        
+    Examples:
+        ```
+        # Get all lights
+        lights = mcp.get_resource("hass://entities/domain/light")
+        
+        # Get all climate devices
+        climate = mcp.get_resource("hass://entities/domain/climate")
+        
+        # Get all sensors
+        sensors = mcp.get_resource("hass://entities/domain/sensor")
+        ```
+        
+    Best Practices:
+        - Use this endpoint when you need detailed information about all entities of a specific type
+        - For a more concise overview, use the domain summary endpoint: hass://entities/domain/{domain}/summary
+        - For sensors and other high-count domains, consider using a search to further filter results
+    """
+    logger.info(f"Getting entities for domain: {domain}")
+    
+    # Fixed pagination values for now
+    page = 1
+    page_size = 50
+    
+    # Get all entities for the specified domain (using lean format for token efficiency)
+    entities = await get_entities(domain=domain, lean=True)
+    
+    # Check if there was an error
+    if isinstance(entities, dict) and "error" in entities:
+        return f"Error retrieving entities: {entities['error']}"
+    
+    # Format the entities as a string
+    result = f"# {domain.capitalize()} Entities\n\n"
+    
+    # Pagination info (fixed for now due to MCP limitations)
+    total_entities = len(entities)
+    
+    # List the entities
+    for entity in sorted(entities, key=lambda e: e["entity_id"]):
+        # Get a friendly name if available
+        friendly_name = entity.get("attributes", {}).get("friendly_name", entity["entity_id"])
+        result += f"- **{entity['entity_id']}**: {entity['state']}"
+        if friendly_name != entity["entity_id"]:
+            result += f" ({friendly_name})"
+        result += "\n"
+    
+    # Add link to summary
+    result += f"\n## Related Resources\n\n"
+    result += f"- [View domain summary](/api/resource/hass://entities/domain/{domain}/summary)\n"
+    
+    return result
+
+# Automation management MCP tools
+@mcp.tool()
+@async_handler("list_automations")
+async def list_automations() -> List[Dict[str, Any]]:
+    """
+    Get a list of all automations from Home Assistant
+    
+    This function retrieves all automations configured in Home Assistant,
+    including their IDs, entity IDs, state, and display names.
+    
+    Returns:
+        A list of automation dictionaries, each containing id, entity_id, 
+        state, and alias (friendly name) fields.
+        
+    Examples:
+        Returns all automation objects with state and friendly names
+    
+    """
+    logger.info("Getting all automations")
+    try:
+        # Get automations will now return data from states API, which is more reliable
+        automations = await get_automations()
+        
+        # Handle error responses that might still occur
+        if isinstance(automations, dict) and "error" in automations:
+            logger.warning(f"Error getting automations: {automations['error']}")
+            return []
+            
+        # Handle case where response is a list with error
+        if isinstance(automations, list) and len(automations) == 1 and isinstance(automations[0], dict) and "error" in automations[0]:
+            logger.warning(f"Error getting automations: {automations[0]['error']}")
+            return []
+            
+        return automations
+    except Exception as e:
+        logger.error(f"Error in list_automations: {str(e)}")
+        return []
+
+# We already have a list_automations tool, so no need to duplicate functionality
+
+@mcp.tool()
+@async_handler("restart_ha")
+async def restart_ha() -> Dict[str, Any]:
+    """
+    Restart Home Assistant
+    
+    ⚠️ WARNING: Temporarily disrupts all Home Assistant operations
+    
+    Returns:
+        Result of restart operation
+    """
+    logger.info("Restarting Home Assistant")
+    return await restart_home_assistant()
+
+@mcp.tool()
+@async_handler("call_service")
+async def call_service_tool(domain: str, service: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Call any Home Assistant service (low-level API access)
+    
+    Args:
+        domain: The domain of the service (e.g., 'light', 'switch', 'automation')
+        service: The service to call (e.g., 'turn_on', 'turn_off', 'toggle')
+        data: Optional data to pass to the service (e.g., {'entity_id': 'light.living_room'})
+    
+    Returns:
+        The response from Home Assistant (usually empty for successful calls)
+    
+    Examples:
+        domain='light', service='turn_on', data={'entity_id': 'light.x', 'brightness': 255}
+        domain='automation', service='reload'
+        domain='fan', service='set_percentage', data={'entity_id': 'fan.x', 'percentage': 50}
+    
+    """
+    logger.info(f"Calling Home Assistant service: {domain}.{service} with data: {data}")
+    return await call_service(domain, service, data or {})
+
+# Prompt functionality
+@mcp.prompt()
+def create_automation(trigger_type: str, entity_id: str = None):
+    """
+    Guide a user through creating a Home Assistant automation
+    
+    This prompt provides a step-by-step guided conversation for creating
+    a new automation in Home Assistant based on the specified trigger type.
+    
+    Args:
+        trigger_type: The type of trigger for the automation (state, time, etc.)
+        entity_id: Optional entity to use as the trigger source
+    
+    Returns:
+        A list of messages for the interactive conversation
+    """
+    # Define the initial system message
+    system_message = """You are an automation creation assistant for Home Assistant.
+You'll guide the user through creating an automation with the following steps:
+1. Define the trigger conditions based on their specified trigger type
+2. Specify the actions to perform
+3. Add any conditions (optional)
+4. Review and confirm the automation"""
+    
+    # Define the first user message based on parameters
+    trigger_description = {
+        "state": "an entity changing state",
+        "time": "a specific time of day",
+        "numeric_state": "a numeric value crossing a threshold",
+        "zone": "entering or leaving a zone",
+        "sun": "sun events (sunrise/sunset)",
+        "template": "a template condition becoming true"
+    }
+    
+    description = trigger_description.get(trigger_type, trigger_type)
+    
+    if entity_id:
+        user_message = f"I want to create an automation triggered by {description} for {entity_id}."
+    else:
+        user_message = f"I want to create an automation triggered by {description}."
+    
+    # Return the conversation starter messages
+    return [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_message}
+    ]
+
+@mcp.prompt()
+def debug_automation(automation_id: str):
+    """
+    Help a user troubleshoot an automation that isn't working
+    
+    This prompt guides the user through the process of diagnosing and fixing
+    issues with an existing Home Assistant automation.
+    
+    Args:
+        automation_id: The entity ID of the automation to troubleshoot
+    
+    Returns:
+        A list of messages for the interactive conversation
+    """
+    system_message = """You are a Home Assistant automation troubleshooting expert.
+You'll help the user diagnose problems with their automation by checking:
+1. Trigger conditions and whether they're being met
+2. Conditions that might be preventing execution
+3. Action configuration issues
+4. Entity availability and connectivity
+5. Permissions and scope issues"""
+    
+    user_message = f"My automation {automation_id} isn't working properly. Can you help me troubleshoot it?"
+    
+    return [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_message}
+    ]
+
+@mcp.prompt()
+def troubleshoot_entity(entity_id: str):
+    """
+    Guide a user through troubleshooting issues with an entity
+    
+    This prompt helps diagnose and resolve problems with a specific
+    Home Assistant entity that isn't functioning correctly.
+    
+    Args:
+        entity_id: The entity ID having issues
+    
+    Returns:
+        A list of messages for the interactive conversation
+    """
+    system_message = """You are a Home Assistant entity troubleshooting expert.
+You'll help the user diagnose problems with their entity by checking:
+1. Entity status and availability
+2. Integration status
+3. Device connectivity
+4. Recent state changes and error patterns
+5. Configuration issues
+6. Common problems with this entity type"""
+    
+    user_message = f"My entity {entity_id} isn't working properly. Can you help me troubleshoot it?"
+    
+    return [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_message}
+    ]
+
+@mcp.prompt()
+def routine_optimizer():
+    """
+    Analyze usage patterns and suggest optimized routines based on actual behavior
+    
+    This prompt helps users analyze their Home Assistant usage patterns and create
+    more efficient routines, automations, and schedules based on real usage data.
+    
+    Returns:
+        A list of messages for the interactive conversation
+    """
+    system_message = """You are a Home Assistant optimization expert specializing in routine analysis.
+You'll help the user analyze their usage patterns and create optimized routines by:
+1. Reviewing entity state histories to identify patterns
+2. Analyzing when lights, climate controls, and other devices are used
+3. Finding correlations between different device usages
+4. Suggesting automations based on detected routines
+5. Optimizing existing automations to better match actual usage
+6. Creating schedules that adapt to the user's lifestyle
+7. Identifying energy-saving opportunities based on usage patterns"""
+    
+    user_message = "I'd like to optimize my home automations based on my actual usage patterns. Can you help analyze how I use my smart home and suggest better routines?"
+    
+    return [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_message}
+    ]
+
+@mcp.prompt()
+def automation_health_check():
+    """
+    Review all automations, find conflicts, redundancies, or improvement opportunities
+    
+    This prompt helps users perform a comprehensive review of their Home Assistant
+    automations to identify issues, optimize performance, and improve reliability.
+    
+    Returns:
+        A list of messages for the interactive conversation
+    """
+    system_message = """You are a Home Assistant automation expert specializing in system optimization.
+You'll help the user perform a comprehensive audit of their automations by:
+1. Reviewing all automations for potential conflicts (e.g., opposing actions)
+2. Identifying redundant automations that could be consolidated
+3. Finding inefficient trigger patterns that might cause unnecessary processing
+4. Detecting missing conditions that could improve reliability
+5. Suggesting template optimizations for more efficient processing
+6. Uncovering potential race conditions between automations
+7. Recommending structural improvements to the automation organization
+8. Highlighting best practices and suggesting implementation changes"""
+    
+    user_message = "I'd like to do a health check on all my Home Assistant automations. Can you help me review them for conflicts, redundancies, and potential improvements?"
+    
+    return [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_message}
+    ]
+
+@mcp.prompt()
+def entity_naming_consistency():
+    """
+    Audit entity names and suggest standardization improvements
+    
+    This prompt helps users analyze their entity naming conventions and create
+    a more consistent, organized naming system across their Home Assistant instance.
+    
+    Returns:
+        A list of messages for the interactive conversation
+    """
+    system_message = """You are a Home Assistant organization expert specializing in entity naming conventions.
+You'll help the user audit and improve their entity naming by:
+1. Analyzing current entity IDs and friendly names for inconsistencies
+2. Identifying patterns in existing naming conventions
+3. Suggesting standardized naming schemes based on entity types and locations
+4. Creating clear guidelines for future entity naming
+5. Proposing specific name changes for entities that don't follow conventions
+6. Showing how to implement these changes without breaking automations
+7. Explaining benefits of consistent naming for automation and UI organization"""
+    
+    user_message = "I'd like to make my Home Assistant entity names more consistent and organized. Can you help me audit my current naming conventions and suggest improvements?"
+    
+    return [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_message}
+    ]
+
+@mcp.prompt()
+def dashboard_layout_generator():
+    """
+    Create optimized dashboards based on user preferences and usage patterns
+    
+    This prompt helps users design effective, user-friendly dashboards
+    for their Home Assistant instance based on their specific needs.
+    
+    Returns:
+        A list of messages for the interactive conversation
+    """
+    system_message = """You are a Home Assistant UI design expert specializing in dashboard creation.
+You'll help the user create optimized dashboards by:
+1. Analyzing which entities they interact with most frequently
+2. Identifying logical groupings of entities (by room, function, or use case)
+3. Suggesting dashboard layouts with the most important controls prominently placed
+4. Creating specialized views for different contexts (mobile, tablet, wall-mounted)
+5. Designing intuitive card arrangements that minimize scrolling/clicking
+6. Recommending specialized cards and custom components that enhance usability
+7. Balancing information density with visual clarity
+8. Creating consistent visual patterns that aid in quick recognition"""
+    
+    user_message = "I'd like to redesign my Home Assistant dashboards to be more functional and user-friendly. Can you help me create optimized layouts based on how I actually use my system?"
+    
+    return [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_message}
+    ]
+
+# Documentation endpoint
+@mcp.tool()
+@async_handler("get_history")
+async def get_history(entity_id: str, hours: int = 24) -> Dict[str, Any]:
+    """
+    Get the history of an entity's state changes
+    
+    Args:
+        entity_id: The entity ID to get history for
+        hours: Number of hours of history to retrieve (default: 24)
+    
+    Returns:
+        A dictionary containing:
+        - entity_id: The entity ID requested
+        - states: List of state objects with timestamps
+        - count: Number of state changes found
+        - first_changed: Timestamp of earliest state change
+        - last_changed: Timestamp of most recent state change
+        
+    Examples:
+        entity_id="light.living_room" - get 24h history
+        entity_id="sensor.temperature", hours=168 - get 7 day history
+    Best Practices:
+        - Keep hours reasonable (24-72) for token efficiency
+        - Use for entities with discrete state changes rather than continuously changing sensors
+        - Consider the state distribution rather than every individual state    
+    """
+    logger.info(f"Getting history for entity: {entity_id}, hours: {hours}")
+    
+    try:
+        # Get current state to ensure entity exists
+        current = await get_entity_state(entity_id, detailed=True)
+        if isinstance(current, dict) and "error" in current:
+            return {
+                "entity_id": entity_id,
+                "error": current["error"],
+                "states": [],
+                "count": 0
+            }
+        
+        # For now, this is a stub that returns minimal dummy data
+        # In a real implementation, this would call the Home Assistant history API
+        now = current.get("last_updated", "2023-03-15T12:00:00.000Z")
+        
+        # Create a dummy history (would be replaced with real API call)
+        states = [
+            {
+                "state": current.get("state", "unknown"),
+                "last_changed": now,
+                "attributes": current.get("attributes", {})
+            }
+        ]
+        
+        # Add a note about this being placeholder data
+        return {
+            "entity_id": entity_id,
+            "states": states,
+            "count": len(states),
+            "first_changed": now,
+            "last_changed": now,
+            "note": "This is placeholder data. Future versions will include real historical data."
+        }
+    except Exception as e:
+        logger.error(f"Error retrieving history for {entity_id}: {str(e)}")
+        return {
+            "entity_id": entity_id,
+            "error": f"Error retrieving history: {str(e)}",
+            "states": [],
+            "count": 0
+        }
+
+@mcp.tool()
+@async_handler("get_error_log")
+async def get_error_log() -> Dict[str, Any]:
+    """
+    Get the Home Assistant error log for troubleshooting
+    
+    Returns:
+        A dictionary containing:
+        - log_text: The full error log text
+        - error_count: Number of ERROR entries found
+        - warning_count: Number of WARNING entries found
+        - integration_mentions: Map of integration names to mention counts
+        - error: Error message if retrieval failed
+        
+    Examples:
+        Returns errors, warnings count and integration mentions
+    Best Practices:
+        - Use this tool when troubleshooting specific Home Assistant errors
+        - Look for patterns in repeated errors
+        - Pay attention to timestamps to correlate errors with events
+        - Focus on integrations with many mentions in the log    
+    """
+    logger.info("Getting Home Assistant error log")
+    return await get_hass_error_log()
+</file>
+
+<file path="tests/conftest.py">
+import os
+import sys
+import pytest
+from unittest.mock import MagicMock, patch, AsyncMock
+import asyncio
+import httpx
+
+# Add app directory to path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+# Mock environment variables before imports
+@pytest.fixture(autouse=True)
+def mock_env_vars():
+    """Mock environment variables to prevent tests from using real credentials."""
+    with patch.dict(os.environ, {
+        "HA_URL": "http://localhost:8123",
+        "HA_TOKEN": "mock_token_for_tests"
+    }):
+        yield
+
+# Mock httpx client
+@pytest.fixture
+def mock_httpx_client():
+    """Create a mock httpx client for testing."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    
+    # Create a mock response
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json = AsyncMock(return_value={})
+    mock_response.raise_for_status = MagicMock()
+    mock_response.text = ""
+    
+    # Set up methods to return the mock response
+    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.post = AsyncMock(return_value=mock_response)
+    mock_client.delete = AsyncMock(return_value=mock_response)
+    
+    # Create a patched httpx.AsyncClient constructor
+    with patch('httpx.AsyncClient', return_value=mock_client):
+        yield mock_client
+
+# Patch app.hass.get_client
+@pytest.fixture(autouse=True)
+def mock_get_client(mock_httpx_client):
+    """Mock the get_client function to return our mock client."""
+    with patch('app.hass.get_client', return_value=mock_httpx_client):
+        yield mock_httpx_client
+
+# Mock HA session
+@pytest.fixture
+def mock_hass_session():
+    """Create a mock Home Assistant session."""
+    mock_session = MagicMock()
+    
+    # Mock common methods
+    mock_session.get = MagicMock()
+    mock_session.post = MagicMock()
+    mock_session.delete = MagicMock()
+    
+    # Configure default returns
+    mock_session.get.return_value.__aenter__.return_value.status = 200
+    mock_session.get.return_value.__aenter__.return_value.json = MagicMock(return_value={})
+    
+    mock_session.post.return_value.__aenter__.return_value.status = 200
+    mock_session.post.return_value.__aenter__.return_value.json = MagicMock(return_value={})
+    
+    mock_session.delete.return_value.__aenter__.return_value.status = 200
+    mock_session.delete.return_value.__aenter__.return_value.json = MagicMock(return_value={})
+    
+    return mock_session
+
+# Mock config
+@pytest.fixture
+def mock_config():
+    """Create a mock configuration."""
+    return {
+        "hass_url": "http://localhost:8123",
+        "hass_token": "mock_token",
+        "config_dir": "/Users/matt/Developer/hass-mcp/config",
+        "log_level": "INFO"
+    }
+</file>
+
+<file path="tests/test_config.py">
+import pytest
+from unittest.mock import patch
+
+from app.config import get_ha_headers, HA_URL, HA_TOKEN
+
+class TestConfig:
+    """Test the configuration module."""
+    
+    def test_get_ha_headers_with_token(self):
+        """Test getting headers with a token."""
+        with patch('app.config.HA_TOKEN', 'test_token'):
+            headers = get_ha_headers()
+            
+            # Check that both headers are present
+            assert 'Content-Type' in headers
+            assert 'Authorization' in headers
+            
+            # Check header values
+            assert headers['Content-Type'] == 'application/json'
+            assert headers['Authorization'] == 'Bearer test_token'
+    
+    def test_get_ha_headers_without_token(self):
+        """Test getting headers without a token."""
+        with patch('app.config.HA_TOKEN', ''):
+            headers = get_ha_headers()
+            
+            # Check that only Content-Type is present
+            assert 'Content-Type' in headers
+            assert 'Authorization' not in headers
+            
+            # Check header value
+            assert headers['Content-Type'] == 'application/json'
+    
+    def test_environment_variable_defaults(self):
+        """Test that environment variables have sensible defaults."""
+        # Instead of mocking os.environ.get completely, let's verify the expected defaults
+        # are used when the environment variables are not set
+        
+        # Get the current values
+        from app.config import HA_URL, HA_TOKEN
+        
+        # Verify the defaults match what we expect
+        # Note: These may differ if environment variables are actually set
+        assert HA_URL.startswith('http://')  # May be localhost or an actual URL
+    
+    def test_environment_variable_custom_values(self):
+        """Test that environment variables can be customized."""
+        env_values = {
+            'HA_URL': 'http://homeassistant.local:8123',
+            'HA_TOKEN': 'custom_token',
+        }
+        
+        def mock_environ_get(key, default=None):
+            return env_values.get(key, default)
+        
+        with patch('os.environ.get', side_effect=mock_environ_get):
+            from importlib import reload
+            import app.config
+            reload(app.config)
+            
+            # Check custom values
+            assert app.config.HA_URL == 'http://homeassistant.local:8123'
+            assert app.config.HA_TOKEN == 'custom_token'
+</file>
+
+<file path="tests/test_hass.py">
+import pytest
+import asyncio
+from unittest.mock import MagicMock, patch, AsyncMock
+import json
+import httpx
+from typing import Dict, List, Any
+
+from app.hass import get_entity_state, call_service, get_entities, get_automations, handle_api_errors
+
+class TestHassAPI:
+    """Test the Home Assistant API functions."""
+
+    @pytest.mark.asyncio
+    async def test_get_entities(self, mock_config):
+        """Test getting all entities."""
+        # Mock response data
+        mock_states = [
+            {"entity_id": "light.living_room", "state": "on", "attributes": {"brightness": 255}},
+            {"entity_id": "switch.kitchen", "state": "off", "attributes": {}}
+        ]
+        
+        # Create mock response
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = mock_states
+        
+        # Create properly awaitable mock
+        mock_client = MagicMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        
+        # Setup client mocking
+        with patch('app.hass.get_client', return_value=mock_client):
+            with patch('app.hass.HA_URL', mock_config["hass_url"]):
+                with patch('app.hass.HA_TOKEN', mock_config["hass_token"]):
+                            # Test function
+                            states = await get_entities()
+                            
+                            # Assertions
+                            assert isinstance(states, list)
+                            assert len(states) == 2
+                            
+                            # Verify API was called correctly
+                            mock_client.get.assert_called_once()
+                            called_url = mock_client.get.call_args[0][0]
+                            assert called_url == f"{mock_config['hass_url']}/api/states"
+
+    @pytest.mark.asyncio
+    async def test_get_entity_state(self, mock_config):
+        """Test getting a specific entity state."""
+        # Mock response data
+        mock_state = {"entity_id": "light.living_room", "state": "on"}
+        
+        # Create mock response
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = mock_state
+        
+        # Create properly awaitable mock
+        mock_client = MagicMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        
+        # Patch the client
+        with patch('app.hass.get_client', return_value=mock_client):
+            with patch('app.hass.HA_URL', mock_config["hass_url"]):
+                with patch('app.hass.HA_TOKEN', mock_config["hass_token"]):
+                    # Test function - use_cache parameter has been removed
+                    state = await get_entity_state("light.living_room")
+                    
+                    # Assertions
+                    assert isinstance(state, dict)
+                    assert state["entity_id"] == "light.living_room"
+                    assert state["state"] == "on"
+                    
+                    # Verify API was called correctly
+                    mock_client.get.assert_called_once()
+                    called_url = mock_client.get.call_args[0][0]
+                    assert called_url == f"{mock_config['hass_url']}/api/states/light.living_room"
+
+    @pytest.mark.asyncio
+    async def test_call_service(self, mock_config):
+        """Test calling a service."""
+        domain = "light"
+        service = "turn_on"
+        data = {"entity_id": "light.living_room", "brightness": 255}
+        
+        # Create mock response
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {"result": "ok"}
+        
+        # Create properly awaitable mock
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        
+        # Patch the client
+        with patch('app.hass.get_client', return_value=mock_client):
+            with patch('app.hass.HA_URL', mock_config["hass_url"]):
+                with patch('app.hass.HA_TOKEN', mock_config["hass_token"]):
+                        # Test function
+                        result = await call_service(domain, service, data)
+                        
+                        # Assertions
+                        assert isinstance(result, dict)
+                        assert result["result"] == "ok"
+                        
+                        # Verify API was called correctly
+                        mock_client.post.assert_called_once()
+                        called_url = mock_client.post.call_args[0][0]
+                        called_data = mock_client.post.call_args[1].get('json')
+                        assert called_url == f"{mock_config['hass_url']}/api/services/{domain}/{service}"
+                        assert called_data == data
+
+    @pytest.mark.asyncio
+    async def test_get_automations(self, mock_config):
+        """Test getting automations from the states API."""
+        # Mock states response with automation entities
+        mock_automation_states = [
+            {
+                "entity_id": "automation.morning_lights", 
+                "state": "on", 
+                "attributes": {
+                    "friendly_name": "Turn on lights in the morning",
+                    "last_triggered": "2025-03-15T07:00:00Z"
+                }
+            },
+            {
+                "entity_id": "automation.night_lights",
+                "state": "off",
+                "attributes": {
+                    "friendly_name": "Turn off lights at night"
+                }
+            }
+        ]
+        
+        # For get_automations we need to mock the get_entities function
+        with patch('app.hass.get_entities', AsyncMock(return_value=mock_automation_states)):
+            # Test function
+            automations = await get_automations()
+            
+            # Assertions
+            assert isinstance(automations, list)
+            assert len(automations) == 2
+            
+            # Verify contents of first automation
+            assert automations[0]["entity_id"] == "automation.morning_lights"
+            assert automations[0]["state"] == "on"
+            assert automations[0]["alias"] == "Turn on lights in the morning"
+            assert automations[0]["last_triggered"] == "2025-03-15T07:00:00Z"
+            
+        # Test error response
+        with patch('app.hass.get_entities', AsyncMock(return_value={"error": "HTTP error: 404 - Not Found"})):
+            # Test function with error
+            automations = await get_automations()
+            
+            # In our new implementation, it should pass through the error
+            assert isinstance(automations, dict)
+            assert "error" in automations
+            assert "404" in automations["error"]
+
+    def test_handle_api_errors_decorator(self):
+        """Test the handle_api_errors decorator."""
+        from app.hass import handle_api_errors
+        import inspect
+        
+        # Create a simple test function with a Dict return annotation
+        @handle_api_errors
+        async def test_dict_function() -> Dict:
+            """Test function that returns a dict."""
+            return {}
+        
+        # Create a simple test function with a str return annotation
+        @handle_api_errors
+        async def test_str_function() -> str:
+            """Test function that returns a string."""
+            return ""
+        
+        # Verify that both functions have their return type annotations preserved
+        assert "Dict" in str(inspect.signature(test_dict_function).return_annotation)
+        assert "str" in str(inspect.signature(test_str_function).return_annotation)
+        
+        # Verify that both functions have a docstring
+        assert test_dict_function.__doc__ == "Test function that returns a dict."
+        assert test_str_function.__doc__ == "Test function that returns a string."
+</file>
+
+<file path="tests/test_server.py">
+import pytest
+import json
+import asyncio
+from unittest.mock import patch, MagicMock, AsyncMock
+import os
+import sys
+import uuid
+
+# Add the app directory to sys.path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+app_dir = os.path.join(parent_dir, "app")
+if app_dir not in sys.path:
+    sys.path.insert(0, app_dir)
+
+class TestMCPServer:
+    """Test the MCP server functionality."""
+    
+    def test_server_version(self):
+        """Test that the server has a version attribute."""
+        # Import the server module directly without mocking
+        # This ensures we're testing the actual code
+        from app.server import mcp
+        
+        # All MCP servers should have a name, and it should be "Hass-MCP"
+        assert hasattr(mcp, "name")
+        assert mcp.name == "Hass-MCP"
+
+    def test_async_handler_decorator(self):
+        """Test the async_handler decorator."""
+        # Import the decorator
+        from app.server import async_handler
+        
+        # Create a test async function
+        async def test_func(arg1, arg2=None):
+            return f"{arg1}_{arg2}"
+        
+        # Apply the decorator
+        decorated_func = async_handler("test_command")(test_func)
+        
+        # Run the decorated function
+        result = asyncio.run(decorated_func("val1", arg2="val2"))
+        
+        # Verify the result
+        assert result == "val1_val2"
+    
+    def test_tool_functions_exist(self):
+        """Test that tool functions exist in the server module."""
+        # Import the server module directly
+        import app.server
+        
+        # List of expected tool functions
+        expected_tools = [
+            "get_version",
+            "get_entity", 
+            "list_entities",
+            "entity_action",
+            "domain_summary_tool",  # Domain summaries tool
+            "call_service_tool",
+            "restart_ha",
+            "list_automations"
+        ]
+        
+        # Check that each expected tool function exists
+        for tool_name in expected_tools:
+            assert hasattr(app.server, tool_name)
+            assert callable(getattr(app.server, tool_name))
+    
+    def test_resource_functions_exist(self):
+        """Test that resource functions exist in the server module."""
+        # Import the server module directly
+        import app.server
+        
+        # List of expected resource functions - Use only the ones actually in server.py
+        expected_resources = [
+            "get_entity_resource", 
+            "get_entity_resource_detailed",
+            "get_all_entities_resource", 
+            "list_states_by_domain_resource",     # Domain-specific resource
+            "search_entities_resource_with_limit"  # Search resource with limit parameter
+        ]
+        
+        # Check that each expected resource function exists
+        for resource_name in expected_resources:
+            assert hasattr(app.server, resource_name)
+            assert callable(getattr(app.server, resource_name))
+            
+    @pytest.mark.asyncio
+    async def test_list_automations_error_handling(self):
+        """Test that list_automations handles errors properly."""
+        from app.server import list_automations
+        
+        # Mock the get_automations function with different scenarios
+        with patch("app.server.get_automations") as mock_get_automations:
+            # Case 1: Test with 404 error response format (list with single dict with error key)
+            mock_get_automations.return_value = [{"error": "HTTP error: 404 - Not Found"}]
+            
+            # Should return an empty list
+            result = await list_automations()
+            assert isinstance(result, list)
+            assert len(result) == 0
+            
+            # Case 2: Test with dict error response
+            mock_get_automations.return_value = {"error": "HTTP error: 404 - Not Found"}
+            
+            # Should return an empty list
+            result = await list_automations()
+            assert isinstance(result, list)
+            assert len(result) == 0
+            
+            # Case 3: Test with unexpected error
+            mock_get_automations.side_effect = Exception("Unexpected error")
+            
+            # Should return an empty list and log the error
+            result = await list_automations()
+            assert isinstance(result, list)
+            assert len(result) == 0
+            
+            # Case 4: Test with successful response
+            mock_automations = [
+                {
+                    "id": "morning_lights",
+                    "entity_id": "automation.morning_lights",
+                    "state": "on",
+                    "alias": "Turn on lights in the morning"
+                }
+            ]
+            mock_get_automations.side_effect = None
+            mock_get_automations.return_value = mock_automations
+            
+            # Should return the automations list
+            result = await list_automations()
+            assert isinstance(result, list)
+            assert len(result) == 1
+            assert result[0]["id"] == "morning_lights"
+            
+    def test_tools_have_proper_docstrings(self):
+        """Test that tool functions have proper docstrings"""
+        # Import the server module directly
+        import app.server
+        
+        # List of expected tool functions
+        tool_functions = [
+            "get_version",
+            "get_entity", 
+            "list_entities",
+            "entity_action",
+            "domain_summary_tool",
+            "call_service_tool",
+            "restart_ha",
+            "list_automations",
+            "search_entities_tool", 
+            "system_overview",
+            "get_error_log"
+        ]
+        
+        # Check that each tool function has a proper docstring and exists
+        for tool_name in tool_functions:
+            assert hasattr(app.server, tool_name), f"{tool_name} function missing"
+            tool_function = getattr(app.server, tool_name)
+            assert tool_function.__doc__ is not None, f"{tool_name} missing docstring"
+            assert len(tool_function.__doc__.strip()) > 10, f"{tool_name} has insufficient docstring"
+    
+    def test_prompt_functions_exist(self):
+        """Test that prompt functions exist in the server module."""
+        # Import the server module directly
+        import app.server
+        
+        # List of expected prompt functions
+        expected_prompts = [
+            "create_automation",
+            "debug_automation",
+            "troubleshoot_entity"
+        ]
+        
+        # Check that each expected prompt function exists
+        for prompt_name in expected_prompts:
+            assert hasattr(app.server, prompt_name)
+            assert callable(getattr(app.server, prompt_name))
+            
+    @pytest.mark.asyncio
+    async def test_search_entities_resource(self):
+        """Test the search_entities_tool function"""
+        from app.server import search_entities_tool
+        
+        # Mock the get_entities function with test data
+        mock_entities = [
+            {"entity_id": "light.living_room", "state": "on", "attributes": {"friendly_name": "Living Room Light", "brightness": 255}},
+            {"entity_id": "light.kitchen", "state": "off", "attributes": {"friendly_name": "Kitchen Light"}}
+        ]
+        
+        with patch("app.server.get_entities", return_value=mock_entities) as mock_get:
+            # Test search with a valid query
+            result = await search_entities_tool(query="living")
+            
+            # Verify the function was called with the right parameters including lean format
+            mock_get.assert_called_once_with(search_query="living", limit=20, lean=True)
+            
+            # Check that the result contains the expected entity data
+            assert result["count"] == 2
+            assert any(e["entity_id"] == "light.living_room" for e in result["results"])
+            assert result["query"] == "living"
+            
+            # Check that domain counts are included
+            assert "domains" in result
+            assert "light" in result["domains"]
+            
+            # Test with empty query (returns all entities instead of error)
+            result = await search_entities_tool(query="")
+            assert "error" not in result
+            assert result["count"] > 0
+            assert "all entities (no filtering)" in result["query"]
+            
+            # Test that simplified representation includes domain-specific attributes
+            result = await search_entities_tool(query="living")
+            assert any("brightness" in e for e in result["results"])
+            
+            # Test with custom limit as an integer
+            mock_get.reset_mock()
+            result = await search_entities_tool(query="light", limit=5)
+            mock_get.assert_called_once_with(search_query="light", limit=5, lean=True)
+            
+            # Test with a different limit to ensure it's respected
+            mock_get.reset_mock()
+            result = await search_entities_tool(query="light", limit=10)
+            mock_get.assert_called_once_with(search_query="light", limit=10, lean=True)
+            
+    @pytest.mark.asyncio
+    async def test_domain_summary_tool(self):
+        """Test the domain_summary_tool function"""
+        from app.server import domain_summary_tool
+        
+        # Mock the summarize_domain function
+        mock_summary = {
+            "domain": "light",
+            "total_count": 2,
+            "state_distribution": {"on": 1, "off": 1},
+            "examples": {
+                "on": [{"entity_id": "light.living_room", "friendly_name": "Living Room Light"}],
+                "off": [{"entity_id": "light.kitchen", "friendly_name": "Kitchen Light"}]
+            },
+            "common_attributes": [("friendly_name", 2), ("brightness", 1)]
+        }
+        
+        with patch("app.server.summarize_domain", return_value=mock_summary) as mock_summarize:
+            # Test the function
+            result = await domain_summary_tool(domain="light", example_limit=3)
+            
+            # Verify the function was called with the right parameters
+            mock_summarize.assert_called_once_with("light", 3)
+            
+            # Check that the result matches the mock data
+            assert result == mock_summary
+            
+    @pytest.mark.asyncio        
+    async def test_get_entity_with_field_filtering(self):
+        """Test the get_entity function with field filtering"""
+        from app.server import get_entity
+        
+        # Mock entity data
+        mock_entity = {
+            "entity_id": "light.living_room",
+            "state": "on",
+            "attributes": {
+                "friendly_name": "Living Room Light",
+                "brightness": 255,
+                "color_temp": 370
+            }
+        }
+        
+        # Mock filtered entity data
+        mock_filtered = {
+            "entity_id": "light.living_room",
+            "state": "on"
+        }
+        
+        # Set up mock for get_entity_state to handle different calls
+        with patch("app.server.get_entity_state") as mock_get_state:
+            # Configure mock to return different responses based on parameters
+            mock_get_state.return_value = mock_filtered
+            
+            # Test with field filtering
+            result = await get_entity(entity_id="light.living_room", fields=["state"])
+            
+            # Verify the function call with fields parameter
+            mock_get_state.assert_called_with("light.living_room", fields=["state"])
+            assert result == mock_filtered
+            
+            # Test with detailed=True
+            mock_get_state.reset_mock()
+            mock_get_state.return_value = mock_entity
+            result = await get_entity(entity_id="light.living_room", detailed=True)
+            
+            # Verify the function call with detailed parameter
+            mock_get_state.assert_called_with("light.living_room", lean=False)
+            assert result == mock_entity
+            
+            # Test default lean mode
+            mock_get_state.reset_mock()
+            mock_get_state.return_value = mock_filtered
+            result = await get_entity(entity_id="light.living_room")
+            
+            # Verify the function call with lean=True parameter
+            mock_get_state.assert_called_with("light.living_room", lean=True)
+            assert result == mock_filtered
+</file>
+
+<file path=".dockerignore">
+# Ignore version control files
+.git
+.gitignore
+
+# Ignore Docker and CI files
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Ignore Python cache files
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+
+# Ignore environment and local files
+.env
+.venv
+venv/
+ENV/
+env/
+
+# Ignore tests and documentation
+tests/
+docs/
+CONTRIBUTING.md
+CHANGELOG.md
+
+# Ignore development tools
+.vscode/
+.idea/
+*.swp
+*.swo
+</file>
+
+<file path=".env.example">
+# Home Assistant Connection
+HA_URL=http://homeassistant.local:8123
+HA_TOKEN=YOUR_LONG_LIVED_ACCESS_TOKEN
+PYTHONPATH=/path/to/hass-mcp
+</file>
+
+<file path=".gitignore">
+# Python
+__pycache__/
+*.egg-info/
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Environment Variables
+.env
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+</file>
+
+<file path=".python-version">
+3.13
+</file>
+
+<file path="Dockerfile">
+# MCP server Dockerfile for Claude Desktop integration
+FROM ghcr.io/astral-sh/uv:0.6.6-python3.13-bookworm
+
+# Set working directory
+WORKDIR /app
+
+# Copy project files
+COPY . .
+
+# Set environment for MCP communication
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+# Install package with UV (using --system flag)
+RUN uv pip install --system -e .
+
+# Run the MCP server with stdio communication using the module directly
+ENTRYPOINT ["python", "-m", "app"]
+</file>
+
+<file path="LICENSE">
+MIT License
+
+Copyright (c) 2025 Matt Voska
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+</file>
+
+<file path="pyproject.toml">
+[project]
+name = "hass-mcp"
+version = "0.1.0"
+description = "Home Assistant Model Context Protocol (MCP) server"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "mcp[cli]>=1.4.1",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.3.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+asyncio_mode = "auto"
+</file>
+
+<file path="pytest.ini">
+[pytest]
+testpaths = tests
+python_files = test_*.py
+python_classes = Test*
+python_functions = test_*
+log_cli = True
+log_cli_level = INFO
+markers =
+    asyncio: Tests that use asyncio
+</file>
+
+<file path="README.md">
+# Hass-MCP
+
+A Model Context Protocol (MCP) server for Home Assistant integration with Claude and other LLMs.
+
+## Overview
+
+Hass-MCP enables AI assistants like Claude to interact directly with your Home Assistant instance, allowing them to:
+
+- Query the state of devices and sensors
+- Control lights, switches, and other entities
+- Get summaries of your smart home
+- Troubleshoot automations and entities
+- Search for specific entities
+- Create guided conversations for common tasks
+
+## Screenshots
+
+<img width="700" alt="Screenshot 2025-03-16 at 15 48 01" src="https://github.com/user-attachments/assets/5f9773b4-6aef-4139-a978-8ec2cc8c0aea" />
+<img width="400" alt="Screenshot 2025-03-16 at 15 50 59" src="https://github.com/user-attachments/assets/17e1854a-9399-4e6d-92cf-cf223a93466e" />
+<img width="400" alt="Screenshot 2025-03-16 at 15 49 26" src="https://github.com/user-attachments/assets/4565f3cd-7e75-4472-985c-7841e1ad6ba8" />
+
+## Features
+
+- **Entity Management**: Get states, control devices, and search for entities
+- **Domain Summaries**: Get high-level information about entity types
+- **Automation Support**: List and control automations
+- **Guided Conversations**: Use prompts for common tasks like creating automations
+- **Smart Search**: Find entities by name, type, or state
+- **Token Efficiency**: Lean JSON responses to minimize token usage
+
+## Installation
+
+### Prerequisites
+
+- Home Assistant instance with Long-Lived Access Token
+- One of the following:
+  - Docker (recommended)
+  - Python 3.13+ and [uv](https://github.com/astral-sh/uv)
+
+## Setting Up With Claude Desktop
+
+### Docker Installation (Recommended)
+
+1. Pull the Docker image:
+
+   ```bash
+   docker pull voska/hass-mcp:latest
+   ```
+
+2. Add the MCP server to Claude Desktop:
+
+   a. Open Claude Desktop and go to Settings
+   b. Navigate to Developer > Edit Config
+   c. Add the following configuration to your `claude_desktop_config.json` file:
+
+   ```json
+   {
+     "mcpServers": {
+       "hass-mcp": {
+         "command": "docker",
+         "args": [
+           "run",
+           "-i",
+           "--rm",
+           "-e",
+           "HA_URL",
+           "-e",
+           "HA_TOKEN",
+           "voska/hass-mcp"
+         ],
+         "env": {
+           "HA_URL": "http://homeassistant.local:8123",
+           "HA_TOKEN": "YOUR_LONG_LIVED_TOKEN"
+         }
+       }
+     }
+   }
+   ```
+
+   d. Replace `YOUR_LONG_LIVED_TOKEN` with your actual Home Assistant long-lived access token
+   e. Update the `HA_URL`:
+
+   - If running Home Assistant on the same machine: use `http://host.docker.internal:8123` (Docker Desktop on Mac/Windows)
+   - If running Home Assistant on another machine: use the actual IP or hostname
+
+   f. Save the file and restart Claude Desktop
+
+3. The "Hass-MCP" tool should now appear in your Claude Desktop tools menu
+
+> **Note**: If you're running Home Assistant in Docker on the same machine, you may need to add `--network host` to the Docker args for the container to access Home Assistant. Alternatively, use the IP address of your machine instead of `host.docker.internal`.
+
+## Other MCP Clients
+
+### Cursor
+
+1. Go to Cursor Settings > MCP > Add New MCP Server
+2. Fill in the form:
+   - Name: `Hass-MCP`
+   - Type: `command`
+   - Command:
+     ```
+     docker run -i --rm -e HA_URL=http://homeassistant.local:8123 -e HA_TOKEN=YOUR_LONG_LIVED_TOKEN voska/hass-mcp
+     ```
+   - Replace `YOUR_LONG_LIVED_TOKEN` with your actual Home Assistant token
+   - Update the HA_URL to match your Home Assistant instance address
+3. Click "Add" to save
+
+### Claude Code (CLI)
+
+To use with Claude Code CLI, you can add the MCP server directly using the `mcp add` command:
+
+**Using Docker (recommended):**
+
+```bash
+claude mcp add hass-mcp -e HA_URL=http://homeassistant.local:8123 -e HA_TOKEN=YOUR_LONG_LIVED_TOKEN -- docker run -i --rm -e HA_URL -e HA_TOKEN voska/hass-mcp
+```
+
+Replace `YOUR_LONG_LIVED_TOKEN` with your actual Home Assistant token and update the HA_URL to match your Home Assistant instance address.
+
+## Usage Examples
+
+Here are some examples of prompts you can use with Claude once Hass-MCP is set up:
+
+- "What's the current state of my living room lights?"
+- "Turn off all the lights in the kitchen"
+- "List all my sensors that contain temperature data"
+- "Give me a summary of my climate entities"
+- "Create an automation that turns on the lights at sunset"
+- "Help me troubleshoot why my bedroom motion sensor automation isn't working"
+- "Search for entities related to my living room"
+
+## Available Tools
+
+Hass-MCP provides several tools for interacting with Home Assistant:
+
+- `get_version`: Get the Home Assistant version
+- `get_entity`: Get the state of a specific entity with optional field filtering
+- `entity_action`: Perform actions on entities (turn on, off, toggle)
+- `list_entities`: Get a list of entities with optional domain filtering and search
+- `search_entities_tool`: Search for entities matching a query
+- `domain_summary_tool`: Get a summary of a domain's entities
+- `list_automations`: Get a list of all automations
+- `call_service_tool`: Call any Home Assistant service
+- `restart_ha`: Restart Home Assistant
+- `get_history`: Get the state history of an entity
+- `get_error_log`: Get the Home Assistant error log
+
+## Prompts for Guided Conversations
+
+Hass-MCP includes several prompts for guided conversations:
+
+- `create_automation`: Guide for creating Home Assistant automations based on trigger type
+- `debug_automation`: Troubleshooting help for automations that aren't working
+- `troubleshoot_entity`: Diagnose issues with entities
+- `routine_optimizer`: Analyze usage patterns and suggest optimized routines based on actual behavior
+- `automation_health_check`: Review all automations, find conflicts, redundancies, or improvement opportunities
+- `entity_naming_consistency`: Audit entity names and suggest standardization improvements
+- `dashboard_layout_generator`: Create optimized dashboards based on user preferences and usage patterns
+
+## Available Resources
+
+Hass-MCP provides the following resource endpoints:
+
+- `hass://entities/{entity_id}`: Get the state of a specific entity
+- `hass://entities/{entity_id}/detailed`: Get detailed information about an entity with all attributes
+- `hass://entities`: List all Home Assistant entities grouped by domain
+- `hass://entities/domain/{domain}`: Get a list of entities for a specific domain
+- `hass://search/{query}/{limit}`: Search for entities matching a query with custom result limit
+
+## Development
+
+### Running Tests
+
+```bash
+uv run pytest tests/
+```
+
+## License
+
+[MIT License](LICENSE)
+</file>
+
+</files>
