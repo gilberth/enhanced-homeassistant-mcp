@@ -1,0 +1,20 @@
+{
+  "name": "enhanced-homeassistant-mcp-examples",
+  "version": "1.0.0",
+  "description": "Example clients for Enhanced Home Assistant MCP Server",
+  "type": "module",
+  "scripts": {
+    "simple": "node simple-client.js",
+    "full": "node smithery-client.js",
+    "secure": "node secure-client.js",
+    "test": "node secure-client.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@smithery/sdk": "^1.0.0",
+    "dotenv": "^16.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0"
+  }
+}

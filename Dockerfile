@@ -43,24 +43,15 @@ RUN addgroup -g 1001 -S mcpuser && \
 # Copy compiled JavaScript from builder stage with correct ownership
 COPY --from=builder --chown=mcpuser:mcpuser /usr/src/app/dist ./dist
 
-# Create a default .env file if one doesn't exist
-RUN if [ ! -f .env ]; then \
-      echo 'HOME_ASSISTANT_URL=http://homeassistant:8123' > .env && \
-      echo 'HOME_ASSISTANT_TOKEN=your_token_here' >> .env && \
-      echo 'DEBUG=false' >> .env && \
-      echo 'REQUEST_TIMEOUT=10000' >> .env; \
-    fi && \
-    chown mcpuser:mcpuser .env
-
 # Switch to non-root user
 USER mcpuser
 
-# Expose port (though MCP uses stdio)
+# Expose port for HTTP MCP server
 EXPOSE 3000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD node -e "console.log('Health check passed')" || exit 1
 
-# Start the server
-CMD ["npm", "start"]
+# Start the server - Smithery will handle configuration via environment
+CMD ["node", "dist/index.js"]

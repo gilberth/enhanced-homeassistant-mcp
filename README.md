@@ -106,15 +106,15 @@ npm start
 npm run inspector
 ```
 
-### 🐳 Docker Deployment (Recommended)
+### 🐳 Docker Deployment (Recomendado)
 
-For a secure and easy deployment using Docker:
+Para un despliegue fácil y seguro usando Docker:
 
 ```bash
-# Build the image
+# Construir la imagen
 docker build -t enhanced-homeassistant-mcp .
 
-# Run the container
+# Ejecutar el contenedor
 docker run -d \
   --name homeassistant-mcp \
   --restart unless-stopped \
@@ -123,7 +123,36 @@ docker run -d \
   enhanced-homeassistant-mcp
 ```
 
-📖 **Complete Docker Guide**: See [DOCKER.md](DOCKER.md) for detailed instructions, troubleshooting, and advanced configuration.
+📖 **Guía completa de Docker**: Ver [DOCKER.md](DOCKER.md) para instrucciones detalladas.
+
+### ☁️ Smithery Deployment (Cloud)
+
+Para usar el servidor desplegado en la nube a través de Smithery:
+
+1. **Visita**: [Smithery.ai](https://smithery.ai)
+2. **Busca**: `@gilberth/enhanced-homeassistant-mcp`
+3. **Configura** tu instancia con:
+   - Home Assistant URL
+   - Long-lived access token
+   - Opciones opcionales (debug, timeout)
+
+```javascript
+// Usar con Smithery SDK
+import { createSmitheryUrl } from "@smithery/sdk";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+
+const config = {
+  homeAssistantToken: "your_token",
+  homeAssistantUrl: "http://your-hass-ip:8123",
+};
+
+const serverUrl = createSmitheryUrl(
+  "https://server.smithery.ai/@gilberth/enhanced-homeassistant-mcp",
+  { config, apiKey: "your-smithery-api-key" }
+);
+```
+
+🎯 **Ventajas de Smithery**: Sin configuración de infraestructura, escalado automático, y acceso global.
 
 ## 🛠️ Available Tools
 
@@ -247,6 +276,30 @@ const searchResults = await homeassistant_search_entities({
   domain: "sensor",
 });
 ```
+
+## 🎮 Client Examples
+
+Ready-to-use client examples are available in the [`examples/`](examples/) directory:
+
+### 📁 Available Examples
+
+- **`simple-client.js`** - Basic connection and tool usage
+- **`smithery-client.js`** - Full-featured demonstration
+- **`secure-client.js`** - Environment-based secure configuration
+
+### 🚀 Quick Start with Examples
+
+```bash
+cd examples
+npm install
+cp .env.example .env
+# Edit .env with your credentials
+npm run secure
+```
+
+🔗 **Using with Smithery**: The examples are ready for use with servers deployed on [Smithery.ai](https://smithery.ai)
+
+📖 **Detailed Guide**: See [`examples/README.md`](examples/README.md) for complete setup instructions
 
 ## 🔧 Development
 

@@ -4,6 +4,7 @@
   "description": "Enhanced MCP server for Home Assistant with comprehensive API integration",
   "type": "module",
   "main": "dist/index.js",
+  "module": "src/index.ts",
   "types": "dist/index.d.ts",
   "bin": {
     "enhanced-homeassistant-mcp": "dist/index.js"
