@@ -9,6 +9,7 @@ A comprehensive MCP (Model Context Protocol) server that provides extensive inte
 ## 🎆 Features
 
 ### 📊 Basic Operations
+
 - ✅ API status verification
 - 📱 Entity state management
 - 🔄 Service calls with advanced parameters
@@ -16,6 +17,7 @@ A comprehensive MCP (Model Context Protocol) server that provides extensive inte
 - 🛠️ Configuration information
 
 ### 🤖 Automation & Control
+
 - 📜 Automation management (enable/disable/trigger)
 - 🎬 Scene activation
 - 📜 Script execution
@@ -23,6 +25,7 @@ A comprehensive MCP (Model Context Protocol) server that provides extensive inte
 - 📅 Scheduled automation insights
 
 ### 📊 History & Monitoring
+
 - 📈 Entity history tracking
 - 📝 Logbook entries
 - ⚠️ Error log monitoring
@@ -30,6 +33,7 @@ A comprehensive MCP (Model Context Protocol) server that provides extensive inte
 - 🔍 Configuration validation
 
 ### 🏠 Device Control
+
 - 💡 **Lights**: Brightness, color, temperature control
 - 🌡️ **Climate**: Temperature, HVAC modes, presets
 - 📺 **Media Players**: Play/pause, volume, media selection
@@ -38,6 +42,7 @@ A comprehensive MCP (Model Context Protocol) server that provides extensive inte
 - 🔍 **Device Discovery**: Filter by type/domain
 
 ### ⚙️ System Administration
+
 - 📊 System information and health
 - 🏷️ Template rendering (Jinja2)
 - 🏠 Area and device management
@@ -49,7 +54,8 @@ A comprehensive MCP (Model Context Protocol) server that provides extensive inte
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Node.js 18+ 
+
+- Node.js 18+
 - Home Assistant instance with API access
 - Long-lived access token from Home Assistant
 
@@ -100,67 +106,86 @@ npm start
 npm run inspector
 ```
 
+### 🐳 Docker Deployment (Recommended)
+
+For a secure and easy deployment using Docker:
+
+```bash
+# Build the image
+docker build -t enhanced-homeassistant-mcp .
+
+# Run the container
+docker run -d \
+  --name homeassistant-mcp \
+  --restart unless-stopped \
+  -e HOME_ASSISTANT_URL="http://your-hass-ip:8123" \
+  -e HOME_ASSISTANT_TOKEN="your_long_lived_token" \
+  enhanced-homeassistant-mcp
+```
+
+📖 **Complete Docker Guide**: See [DOCKER.md](DOCKER.md) for detailed instructions, troubleshooting, and advanced configuration.
+
 ## 🛠️ Available Tools
 
 ### Basic Tools
 
-| Tool | Description | Parameters |
-|------|-------------|------------|
-| `homeassistant_api_status` | Check API connectivity | None |
-| `homeassistant_get_entity_state` | Get entity state | `entity_id` |
-| `homeassistant_list_all_entities` | List all entities | `domain` (optional) |
-| `homeassistant_call_service` | Call HA service | `domain`, `service`, `entity_id`, `service_data` |
-| `homeassistant_list_services` | List available services | `domain` (optional) |
-| `homeassistant_get_config` | Get HA configuration | None |
+| Tool                              | Description             | Parameters                                       |
+| --------------------------------- | ----------------------- | ------------------------------------------------ |
+| `homeassistant_api_status`        | Check API connectivity  | None                                             |
+| `homeassistant_get_entity_state`  | Get entity state        | `entity_id`                                      |
+| `homeassistant_list_all_entities` | List all entities       | `domain` (optional)                              |
+| `homeassistant_call_service`      | Call HA service         | `domain`, `service`, `entity_id`, `service_data` |
+| `homeassistant_list_services`     | List available services | `domain` (optional)                              |
+| `homeassistant_get_config`        | Get HA configuration    | None                                             |
 
 ### Automation Tools
 
-| Tool | Description | Parameters |
-|------|-------------|------------|
-| `homeassistant_list_automations` | List all automations | None |
-| `homeassistant_toggle_automation` | Enable/disable automation | `entity_id`, `action` |
-| `homeassistant_trigger_automation` | Trigger automation | `entity_id` |
-| `homeassistant_list_scenes` | List all scenes | None |
-| `homeassistant_activate_scene` | Activate scene | `entity_id` |
-| `homeassistant_list_scripts` | List all scripts | None |
-| `homeassistant_run_script` | Run script | `entity_id` |
-| `homeassistant_list_input_booleans` | List input booleans | None |
-| `homeassistant_toggle_input_boolean` | Toggle input boolean | `entity_id`, `action` |
+| Tool                                 | Description               | Parameters            |
+| ------------------------------------ | ------------------------- | --------------------- |
+| `homeassistant_list_automations`     | List all automations      | None                  |
+| `homeassistant_toggle_automation`    | Enable/disable automation | `entity_id`, `action` |
+| `homeassistant_trigger_automation`   | Trigger automation        | `entity_id`           |
+| `homeassistant_list_scenes`          | List all scenes           | None                  |
+| `homeassistant_activate_scene`       | Activate scene            | `entity_id`           |
+| `homeassistant_list_scripts`         | List all scripts          | None                  |
+| `homeassistant_run_script`           | Run script                | `entity_id`           |
+| `homeassistant_list_input_booleans`  | List input booleans       | None                  |
+| `homeassistant_toggle_input_boolean` | Toggle input boolean      | `entity_id`, `action` |
 
 ### History Tools
 
-| Tool | Description | Parameters |
-|------|-------------|------------|
-| `homeassistant_get_entity_history` | Get entity history | `entity_id`, `start_time`, `end_time`, `minimal_response` |
-| `homeassistant_get_logbook` | Get logbook entries | `entity_id`, `start_time`, `end_time` |
-| `homeassistant_get_events` | List event types | None |
-| `homeassistant_get_error_log` | Get error log | None |
-| `homeassistant_check_config` | Validate configuration | None |
+| Tool                               | Description            | Parameters                                                |
+| ---------------------------------- | ---------------------- | --------------------------------------------------------- |
+| `homeassistant_get_entity_history` | Get entity history     | `entity_id`, `start_time`, `end_time`, `minimal_response` |
+| `homeassistant_get_logbook`        | Get logbook entries    | `entity_id`, `start_time`, `end_time`                     |
+| `homeassistant_get_events`         | List event types       | None                                                      |
+| `homeassistant_get_error_log`      | Get error log          | None                                                      |
+| `homeassistant_check_config`       | Validate configuration | None                                                      |
 
 ### Device Control Tools
 
-| Tool | Description | Parameters |
-|------|-------------|------------|
-| `homeassistant_control_lights` | Control lights | `entity_id`, `action`, `brightness`, `color_name`, `rgb_color`, etc. |
-| `homeassistant_control_climate` | Control climate devices | `entity_id`, `temperature`, `hvac_mode`, `preset_mode`, etc. |
-| `homeassistant_control_media_player` | Control media players | `entity_id`, `action`, `media_content_id`, `volume_level`, etc. |
-| `homeassistant_control_covers` | Control covers/blinds | `entity_id`, `action`, `position` |
-| `homeassistant_get_devices_by_type` | List devices by domain | `domain` |
-| `homeassistant_send_notification` | Send notifications | `service`, `title`, `message`, `target` |
+| Tool                                 | Description             | Parameters                                                           |
+| ------------------------------------ | ----------------------- | -------------------------------------------------------------------- |
+| `homeassistant_control_lights`       | Control lights          | `entity_id`, `action`, `brightness`, `color_name`, `rgb_color`, etc. |
+| `homeassistant_control_climate`      | Control climate devices | `entity_id`, `temperature`, `hvac_mode`, `preset_mode`, etc.         |
+| `homeassistant_control_media_player` | Control media players   | `entity_id`, `action`, `media_content_id`, `volume_level`, etc.      |
+| `homeassistant_control_covers`       | Control covers/blinds   | `entity_id`, `action`, `position`                                    |
+| `homeassistant_get_devices_by_type`  | List devices by domain  | `domain`                                                             |
+| `homeassistant_send_notification`    | Send notifications      | `service`, `title`, `message`, `target`                              |
 
 ### System Tools
 
-| Tool | Description | Parameters |
-|------|-------------|------------|
-| `homeassistant_system_info` | Get system information | None |
-| `homeassistant_render_template` | Render Jinja2 template | `template` |
-| `homeassistant_list_areas` | List all areas | None |
-| `homeassistant_list_devices` | List all devices | None |
-| `homeassistant_list_integrations` | List integrations | None |
-| `homeassistant_restart_service` | Restart Home Assistant | `confirm` |
-| `homeassistant_supervisor_info` | Get Supervisor info | None |
-| `homeassistant_list_addons` | List add-ons | None |
-| `homeassistant_search_entities` | Search entities | `search`, `domain` |
+| Tool                              | Description            | Parameters         |
+| --------------------------------- | ---------------------- | ------------------ |
+| `homeassistant_system_info`       | Get system information | None               |
+| `homeassistant_render_template`   | Render Jinja2 template | `template`         |
+| `homeassistant_list_areas`        | List all areas         | None               |
+| `homeassistant_list_devices`      | List all devices       | None               |
+| `homeassistant_list_integrations` | List integrations      | None               |
+| `homeassistant_restart_service`   | Restart Home Assistant | `confirm`          |
+| `homeassistant_supervisor_info`   | Get Supervisor info    | None               |
+| `homeassistant_list_addons`       | List add-ons           | None               |
+| `homeassistant_search_entities`   | Search entities        | `search`, `domain` |
 
 ## 📝 Usage Examples
 
@@ -169,7 +194,7 @@ npm run inspector
 ```javascript
 // Get light state
 const lightState = await homeassistant_get_entity_state({
-  entity_id: "light.living_room"
+  entity_id: "light.living_room",
 });
 
 // Turn on light with brightness and color
@@ -177,7 +202,7 @@ const result = await homeassistant_control_lights({
   entity_id: "light.living_room",
   action: "turn_on",
   brightness_pct: 75,
-  color_name: "warm_white"
+  color_name: "warm_white",
 });
 ```
 
@@ -190,12 +215,12 @@ const automations = await homeassistant_list_automations();
 // Enable an automation
 const enabled = await homeassistant_toggle_automation({
   entity_id: "automation.morning_routine",
-  action: "turn_on"
+  action: "turn_on",
 });
 
 // Activate a scene
 const scene = await homeassistant_activate_scene({
-  entity_id: "scene.movie_time"
+  entity_id: "scene.movie_time",
 });
 ```
 
@@ -206,7 +231,7 @@ const scene = await homeassistant_activate_scene({
 const climate = await homeassistant_control_climate({
   entity_id: "climate.living_room",
   temperature: 22,
-  hvac_mode: "heat"
+  hvac_mode: "heat",
 });
 ```
 
@@ -219,7 +244,7 @@ const systemInfo = await homeassistant_system_info();
 // Search for entities
 const searchResults = await homeassistant_search_entities({
   search: "temperature",
-  domain: "sensor"
+  domain: "sensor",
 });
 ```
 
@@ -264,21 +289,25 @@ curl -H "Authorization: Bearer YOUR_TOKEN" \
 ### Common Issues
 
 **Connection Failed**
+
 - Verify HOME_ASSISTANT_URL is correct and accessible
 - Check that Home Assistant is running
 - Ensure no firewall blocking the connection
 
 **Authentication Failed**
+
 - Verify your long-lived access token is correct
 - Check token hasn't expired or been revoked
 - Ensure token has necessary permissions
 
 **Entity Not Found**
+
 - Use `homeassistant_list_all_entities` to find correct entity IDs
 - Check entity exists and is enabled in Home Assistant
 - Verify correct domain prefix (e.g., `light.`, `sensor.`)
 
 **Service Call Failed**
+
 - Use `homeassistant_list_services` to verify service availability
 - Check service parameters are correct for your device
 - Some services require specific entity types or states
