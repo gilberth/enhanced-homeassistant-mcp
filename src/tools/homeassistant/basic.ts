@@ -516,7 +516,7 @@ export function registerBasicTools(server: McpServer) {
           return {
             entity_id,
             success: result.success,
-            message: result.success ? "Success" : result.message
+            message: result.success ? "Success" : (result.message || "Unknown error")
           };
         } catch (error) {
           return {
@@ -715,7 +715,7 @@ export function registerBasicTools(server: McpServer) {
               results.push({
                 entity_id,
                 success: result.success,
-                message: result.success ? "Success" : result.message
+                message: result.success ? "Success" : (result.message || "Unknown error")
               });
             } catch (error) {
               results.push({
