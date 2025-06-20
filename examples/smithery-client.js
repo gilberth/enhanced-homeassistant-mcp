@@ -4,7 +4,7 @@
  */
 
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { createSmitheryUrl } from "@smithery/sdk";
+import { createSmitheryUrl } from "@smithery/sdk/shared/config.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 
 // Configuration for your Home Assistant instance
