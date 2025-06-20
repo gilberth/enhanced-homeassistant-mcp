@@ -6,6 +6,21 @@
 
 A comprehensive MCP (Model Context Protocol) server that provides extensive integration with Home Assistant, enabling AI assistants to interact with smart home devices, automations, and system management.
 
+## 🚀 Quick Start with NPX
+
+**No installation required!** Run directly with npx:
+
+```bash
+# Set your Home Assistant credentials
+export HOMEASSISTANT_URL="http://your-ha-ip:8123"
+export HOMEASSISTANT_TOKEN="your-long-lived-access-token"
+
+# Start the server
+npx @thelord/enhanced-homeassistant-mcp
+```
+
+📖 **[Complete NPX Usage Guide →](NPX_USAGE.md)**
+
 > **🚧 Smithery Deployment Status**: Currently optimizing tool loading to prevent timeout during Smithery's tool scanning. See [TIMEOUT_RESOLUTION.md](TIMEOUT_RESOLUTION.md) for details.
 
 ## 🎆 Features
@@ -95,6 +110,20 @@ REQUEST_TIMEOUT=10000
 5. Give it a name and copy the generated token
 
 ### Running the Server
+
+#### Option 1: NPX (Recommended - No installation)
+
+```bash
+# Quick start
+npx @thelord/enhanced-homeassistant-mcp
+
+# With options
+npx @thelord/enhanced-homeassistant-mcp --debug start
+npx @thelord/enhanced-homeassistant-mcp inspect
+npx @thelord/enhanced-homeassistant-mcp health
+```
+
+#### Option 2: Local Installation
 
 ```bash
 # Development mode

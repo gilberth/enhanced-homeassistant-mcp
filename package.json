@@ -1,5 +1,5 @@
 {
-  "name": "enhanced-homeassistant-mcp",
+  "name": "@thelord/enhanced-homeassistant-mcp",
   "version": "1.0.0",
   "description": "Enhanced MCP server for Home Assistant with comprehensive API integration",
   "type": "module",
@@ -7,7 +7,9 @@
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "enhanced-homeassistant-mcp": "dist/index.js"
+    "enhanced-homeassistant-mcp": "dist/cli.js",
+    "enhanced-ha-mcp": "dist/cli.js",
+    "ha-mcp": "dist/cli.js"
   },
   "scripts": {
     "build": "tsc",
@@ -18,11 +20,32 @@
     "test": "node test/test-server.js",
     "test:build": "npm run build && node test/test-server.js",
     "clean": "rm -rf dist/",
-    "rebuild": "npm run clean && npm run build"
+    "rebuild": "npm run clean && npm run build",
+    "prepublishOnly": "npm run clean && npm run build",
+    "postinstall": "npm run build",
+    "cli": "node dist/cli.js",
+    "cli:help": "node dist/cli.js help",
+    "cli:health": "node dist/cli.js health",
+    "cli:inspect": "node dist/cli.js inspect",
+    "cli:minimal": "node dist/cli.js minimal"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "DOCKER.md",
+    "CONTRIBUTING.md"
   ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/thelord/enhanced-homeassistant-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/thelord/enhanced-homeassistant-mcp/issues"
+  },
+  "homepage": "https://github.com/thelord/enhanced-homeassistant-mcp#readme",
   "keywords": [
     "mcp",
     "home-assistant",
@@ -30,7 +53,7 @@
     "automation",
     "iot"
   ],
-  "author": "Enhanced by Assistant",
+  "author": "thelord",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.13.0",
