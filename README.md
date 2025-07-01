@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/gilberth-enhanced-homeassistant-mcp-badge.png)](https://mseep.ai/app/gilberth-enhanced-homeassistant-mcp)
+
 # Enhanced Home Assistant MCP
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
